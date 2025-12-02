@@ -25,14 +25,17 @@ TG_CHAT_ID = "-1003177803911"
 # 并发健康检查数量（默认5个）
 CONCURRENT_HEALTH_CHECKS = "5"
 
-# 通知冷却时间（毫秒，默认5分钟）
-NOTIFICATION_COOLDOWN = "300000"
+# 通知冷却时间（毫秒，默认10分钟）
+NOTIFICATION_COOLDOWN = "600000"
 
 # 快速健康检查超时（毫秒，默认800ms）
 FAST_CHECK_TIMEOUT = "800"
 
 # 快速检查缓存时间（毫秒，默认2秒）
 FAST_CHECK_CACHE_TTL = "2000"
+
+# IP通知冷却时间（毫秒，默认5分钟）
+IP_NOTIFICATION_COOLDOWN = "300000"
 
 # 触发器配置
 [triggers]

@@ -6,6 +6,7 @@ const NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 通知冷却时间5分钟
 const CONCURRENT_HEALTH_CHECKS = 5; // 并发健康检查数量
 const FAST_CHECK_TIMEOUT = 800; // 快速检查超时800ms（减少超时）
 const FAST_CHECK_CACHE_TTL = 2000; // 快速检查缓存2秒（缩短以提高新鲜度）
+const IP_NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // IP通知冷却时间5分钟
 
 // 默认后端列表
 const DEFAULT_BACKENDS = [];
@@ -21,7 +22,9 @@ let cache = {
   lastNotificationTime: 0,
   fastHealthChecks: new Map(),
   healthyBackendsList: [], // 新增：健康后端列表缓存
-  healthyBackendsLastUpdated: 0
+  healthyBackendsLastUpdated: 0,
+  ipNotificationTimestamps: new Map(), // 新增：IP通知时间戳
+  ipNotificationBackends: new Map(), // 新增：IP上次使用的后端
 };
 
 // 生成唯一请求ID用于日志追踪
@@ -46,6 +49,90 @@ function getBackendsFromEnv(env) {
     console.error('解析BACKEND_URLS失败:', error);
   }
   return DEFAULT_BACKENDS;
+}
+
+// 检查是否需要发送IP通知
+function shouldSendIPNotification(clientIp, backendUrl) {
+  const now = Date.now();
+  const lastTime = cache.ipNotificationTimestamps.get(clientIp);
+  const lastBackend = cache.ipNotificationBackends.get(clientIp);
+  
+  // 如果从未发送过通知，或者后端发生变化，需要发送
+  if (!lastTime || lastBackend !== backendUrl) {
+    return true;
+  }
+  
+  // 检查冷却时间
+  const ipCooldown = IP_NOTIFICATION_COOLDOWN;
+  return now - lastTime > ipCooldown;
+}
+
+// 更新IP通知记录
+function updateIPNotificationRecord(clientIp, backendUrl) {
+  const now = Date.now();
+  cache.ipNotificationTimestamps.set(clientIp, now);
+  cache.ipNotificationBackends.set(clientIp, backendUrl);
+  
+  // 定期清理过期的IP记录（24小时）
+  const maxAge = 24 * 60 * 60 * 1000; // 24小时
+  for (const [ip, timestamp] of cache.ipNotificationTimestamps.entries()) {
+    if (now - timestamp > maxAge) {
+      cache.ipNotificationTimestamps.delete(ip);
+      cache.ipNotificationBackends.delete(ip);
+    }
+  }
+}
+
+// 发送订阅转换请求通知（异步）
+async function sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version = '未知版本') {
+  const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
+  const chatId = getConfig(env, 'TG_CHAT_ID', '');
+  
+  if (!botToken || !chatId) {
+    return false;
+  }
+  
+  try {
+    // 获取北京时间
+    const beijingTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+    
+    // 创建通知消息
+    let message = `🔔 订阅转换请求通知\n\n`;
+    message += `⏰ 请求时间: ${beijingTimeStr} (北京时间)\n`;
+    message += `🚀 使用后端: ${backendUrl}\n`;
+    message += `📦 版本: ${version}\n`;
+    message += `⚡ 响应时间: ${responseTime}ms\n`;
+    message += `📝 请求ID: ${requestId}\n\n`;
+    message += `⏳ IP通知冷却: 5分钟。`;
+    
+    // 发送到Telegram
+    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    const response = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        disable_notification: false
+      })
+    });
+    
+    if (response.ok) {
+      console.log(`[${requestId}] 订阅转换请求通知发送成功，IP: ${clientIp}`);
+      return true;
+    } else {
+      console.error(`[${requestId}] 订阅转换请求通知发送失败，状态码: ${response.status}`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`[${requestId}] 订阅转换请求通知发送异常:`, error);
+    return false;
+  }
 }
 
 // 极速健康检查（优化版本，只检查最基本功能）
@@ -454,7 +541,7 @@ async function findAvailableBackendForRequest(kv, requestId, env) {
 }
 
 // 处理订阅转换请求 - 优化版本
-async function handleSubconverterRequest(request, backendUrl, requestId, env) {
+async function handleSubconverterRequest(request, backendUrl, requestId, env, ctx) {
   const url = new URL(request.url);
   const backendPath = url.pathname + url.search;
   
@@ -509,6 +596,27 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env) {
     // 添加缓存控制头（避免客户端缓存问题）
     if (!responseHeaders.has('Cache-Control')) {
       responseHeaders.set('Cache-Control', 'no-store, max-age=0');
+    }
+    
+    // 异步发送订阅转换请求通知（不阻塞主响应）
+    if (response.ok) {
+      // 获取客户端IP
+      const clientIp = request.headers.get('cf-connecting-ip') || 
+                       request.headers.get('x-forwarded-for') || 
+                       'unknown';
+      
+      // 获取后端版本信息
+      const cacheKey = `health_${backendUrl}`;
+      const cachedHealth = cache.backendVersions.get(cacheKey);
+      const version = cachedHealth?.result?.version || '未知版本';
+      
+      // 检查是否需要发送通知
+      if (shouldSendIPNotification(clientIp, backendUrl)) {
+        // 异步发送通知，不等待结果
+        ctx.waitUntil(sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version));
+        // 更新IP通知记录
+        updateIPNotificationRecord(clientIp, backendUrl);
+      }
     }
     
     return new Response(response.body, {
@@ -877,6 +985,7 @@ async function handleApiRequest(request, env, requestId) {
           cache_ttl: cacheTtl,
           health_check_timeout: healthCheckTimeout,
           notification_cooldown: NOTIFICATION_COOLDOWN,
+          ip_notification_cooldown: IP_NOTIFICATION_COOLDOWN,
           fast_check_timeout: FAST_CHECK_TIMEOUT,
           fast_check_cache_ttl: FAST_CHECK_CACHE_TTL
         },
@@ -909,7 +1018,9 @@ async function handleApiRequest(request, env, requestId) {
         lastNotificationTime: 0,
         fastHealthChecks: new Map(),
         healthyBackendsList: [],
-        healthyBackendsLastUpdated: 0
+        healthyBackendsLastUpdated: 0,
+        ipNotificationTimestamps: new Map(),
+        ipNotificationBackends: new Map()
       };
       
       // 清理KV中的健康状态
@@ -1175,6 +1286,23 @@ function createStatusPage(requestId, backends, health, availableBackend) {
             color: #856404;
             font-size: 14px;
         }
+        .notification-info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .notification-info h3 {
+            color: #0c5460;
+            margin-bottom: 10px;
+            font-weight: 400;
+        }
+        .notification-info ul {
+            margin-left: 20px;
+            color: #0c5460;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
@@ -1252,6 +1380,16 @@ function createStatusPage(requestId, backends, health, availableBackend) {
             }).join('')}
         </div>
         ` : ''}
+        
+        <div class="notification-info">
+            <h3>🔔 通知系统</h3>
+            <ul>
+                <li>定时健康检查: 每5分钟执行一次，发送状态报告</li>
+                <li>订阅转换请求: 每次请求发送通知，同一IP5分钟内不重复</li>
+                <li>服务状态变化: 服务中断/恢复时发送即时通知</li>
+                <li>IP通知冷却: ${IP_NOTIFICATION_COOLDOWN / 60000}分钟</li>
+            </ul>
+        </div>
         
         <div class="optimization-info">
             <h3>⚡ 性能优化特性</h3>
@@ -1350,7 +1488,7 @@ export default {
           const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
           const chatId = getConfig(env, 'TG_CHAT_ID', '');
           if (botToken && chatId) {
-            await sendServiceStatusNotification(false, null, requestId, env);
+            ctx.waitUntil(sendServiceStatusNotification(false, null, requestId, env));
           }
         }
         
@@ -1372,11 +1510,11 @@ export default {
         const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
         const chatId = getConfig(env, 'TG_CHAT_ID', '');
         if (botToken && chatId) {
-          await sendServiceStatusNotification(true, backendUrl, requestId, env);
+          ctx.waitUntil(sendServiceStatusNotification(true, backendUrl, requestId, env));
         }
       }
       
-      const response = await handleSubconverterRequest(request, backendUrl, requestId, env);
+      const response = await handleSubconverterRequest(request, backendUrl, requestId, env, ctx);
       
       // 记录成功请求
       console.log(`[${requestId}] 请求处理完成，状态码: ${response.status}`);
@@ -1409,7 +1547,7 @@ export default {
       const chatId = getConfig(env, 'TG_CHAT_ID', '');
       if (botToken && chatId) {
         console.log(`[${requestId}] 发送Telegram通知`);
-        await sendTelegramNotification(checkResults, requestId, env);
+        ctx.waitUntil(sendTelegramNotification(checkResults, requestId, env));
       } else {
         console.log(`[${requestId}] Telegram通知未配置，跳过发送`);
       }
