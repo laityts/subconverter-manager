@@ -25,6 +25,7 @@ let cache = {
   healthyBackendsLastUpdated: 0,
   ipNotificationTimestamps: new Map(), // 新增：IP通知时间戳
   ipNotificationBackends: new Map(), // 新增：IP上次使用的后端
+  backendVersionCache: new Map(), // 新增：专门存储后端版本信息
 };
 
 // 生成唯一请求ID用于日志追踪
@@ -83,8 +84,54 @@ function updateIPNotificationRecord(clientIp, backendUrl) {
   }
 }
 
+// 获取后端版本信息（优化版本）
+async function getBackendVersion(backendUrl, requestId) {
+  const cacheKey = `version_${backendUrl}`;
+  const cached = cache.backendVersionCache.get(cacheKey);
+  const now = Date.now();
+  
+  // 版本信息缓存5分钟
+  if (cached && now - cached.timestamp < 5 * 60 * 1000) {
+    return cached.version;
+  }
+  
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FAST_CHECK_TIMEOUT);
+    
+    const response = await fetch(`${backendUrl}/version`, {
+      signal: controller.signal,
+      headers: { 
+        'User-Agent': 'subconverter-failover-worker/1.0',
+        'Accept': 'text/plain',
+        'X-Request-ID': requestId
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (response.status === 200) {
+      const text = await response.text();
+      const version = text.trim();
+      
+      // 缓存版本信息
+      cache.backendVersionCache.set(cacheKey, {
+        version: version || '未知版本',
+        timestamp: now
+      });
+      
+      return version || '未知版本';
+    }
+  } catch (error) {
+    console.log(`[${requestId}] 获取后端版本失败: ${backendUrl}, 错误: ${error.message}`);
+  }
+  
+  // 返回默认值
+  return '未知版本';
+}
+
 // 发送订阅转换请求通知（异步）
-async function sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version = '未知版本') {
+async function sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version = null) {
   const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
   const chatId = getConfig(env, 'TG_CHAT_ID', '');
   
@@ -97,11 +144,17 @@ async function sendSubconverterRequestNotification(clientIp, backendUrl, respons
     const beijingTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
     const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
     
+    // 如果版本为null，尝试获取版本
+    let finalVersion = version;
+    if (finalVersion === null) {
+      finalVersion = await getBackendVersion(backendUrl, requestId);
+    }
+    
     // 创建通知消息
     let message = `🔔 订阅转换请求通知\n\n`;
     message += `⏰ 请求时间: ${beijingTimeStr} (北京时间)\n`;
     message += `🚀 使用后端: ${backendUrl}\n`;
-    message += `📦 版本: ${version}\n`;
+    message += `📦 版本: ${finalVersion}\n`;
     message += `⚡ 响应时间: ${responseTime}ms\n`;
     message += `📝 请求ID: ${requestId}\n\n`;
     message += `⏳ IP通知冷却: 5分钟。`;
@@ -183,10 +236,22 @@ async function ultraFastHealthCheck(url, requestId) {
       try {
         // 使用非阻塞方式读取文本
         const text = await response.text().catch(() => '');
-        result.version = text.substring(0, 30);
+        const version = text.trim();
+        result.version = version || '未知版本';
+        
+        // 更新版本缓存
+        if (version) {
+          cache.backendVersionCache.set(`version_${url}`, {
+            version: version,
+            timestamp: now
+          });
+        }
       } catch (e) {
         // 忽略版本读取错误
+        result.version = '未知版本';
       }
+    } else {
+      result.version = '未知版本';
     }
     
     // 缓存极速检查结果
@@ -206,7 +271,8 @@ async function ultraFastHealthCheck(url, requestId) {
       healthy: false,
       responseTime: null,
       timestamp: now,
-      error: error.name
+      error: error.name,
+      version: '未知版本'
     };
     
     // 缓存失败结果
@@ -303,19 +369,29 @@ async function checkBackendHealth(url, requestId, env) {
     if (response.status === 200) {
       const text = await response.text();
       const healthy = text.includes('subconverter');
+      const version = text.trim().substring(0, 50);
       result = {
         healthy,
-        version: healthy ? text.trim().substring(0, 50) : null,
+        version: healthy ? version : '未知版本',
         timestamp: new Date().toISOString(),
         status: response.status,
         responseTime
       };
+      
+      // 更新版本缓存
+      if (healthy && version) {
+        cache.backendVersionCache.set(`version_${url}`, {
+          version: version,
+          timestamp: now
+        });
+      }
     } else {
       result = { 
         healthy: false, 
         status: response.status,
         timestamp: new Date().toISOString(),
-        responseTime
+        responseTime,
+        version: '未知版本'
       };
     }
     
@@ -330,7 +406,8 @@ async function checkBackendHealth(url, requestId, env) {
     const result = { 
       healthy: false, 
       error: error.name === 'AbortError' ? 'Timeout' : error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      version: '未知版本'
     };
     
     // 缓存失败结果
@@ -451,7 +528,7 @@ async function parallelUltraFastHealthChecks(urls, requestId) {
       const health = await ultraFastHealthCheck(url, `${requestId}-${url}`);
       return { url, health };
     } catch (error) {
-      return { url, health: { healthy: false, error: error.name } };
+      return { url, health: { healthy: false, error: error.name, version: '未知版本' } };
     }
   });
   
@@ -605,15 +682,10 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env, ct
                        request.headers.get('x-forwarded-for') || 
                        'unknown';
       
-      // 获取后端版本信息
-      const cacheKey = `health_${backendUrl}`;
-      const cachedHealth = cache.backendVersions.get(cacheKey);
-      const version = cachedHealth?.result?.version || '未知版本';
-      
       // 检查是否需要发送通知
       if (shouldSendIPNotification(clientIp, backendUrl)) {
         // 异步发送通知，不等待结果
-        ctx.waitUntil(sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version));
+        ctx.waitUntil(sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, null));
         // 更新IP通知记录
         updateIPNotificationRecord(clientIp, backendUrl);
       }
@@ -633,7 +705,8 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env, ct
       result: {
         healthy: false,
         error: error.message,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        version: '未知版本'
       },
       timestamp: Date.now()
     });
@@ -652,7 +725,7 @@ async function concurrentHealthChecks(urls, requestId, env) {
       const health = await checkBackendHealth(url, `${requestId}-${url}`, env);
       return { url, health };
     } catch (error) {
-      return { url, health: { healthy: false, error: error.message } };
+      return { url, health: { healthy: false, error: error.message, version: '未知版本' } };
     }
   });
   
@@ -1020,7 +1093,8 @@ async function handleApiRequest(request, env, requestId) {
         healthyBackendsList: [],
         healthyBackendsLastUpdated: 0,
         ipNotificationTimestamps: new Map(),
-        ipNotificationBackends: new Map()
+        ipNotificationBackends: new Map(),
+        backendVersionCache: new Map()
       };
       
       // 清理KV中的健康状态
@@ -1067,17 +1141,25 @@ async function handleApiRequest(request, env, requestId) {
           clearTimeout(timeoutId);
           const responseTime = Date.now() - startTime;
           
+          let version = '未知版本';
+          if (response.status === 200) {
+            const text = await response.text();
+            version = text.trim() || '未知版本';
+          }
+          
           results[url] = {
             status: response.status,
             responseTime,
-            healthy: response.status === 200
+            healthy: response.status === 200,
+            version: version
           };
         } catch (error) {
           results[url] = {
             status: 0,
             responseTime: Date.now() - startTime,
             healthy: false,
-            error: error.name
+            error: error.name,
+            version: '未知版本'
           };
         }
       });
@@ -1334,7 +1416,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
         <div class="current-backend">
             <h3>当前使用后端</h3>
             <div class="backend-url">${availableBackend}</div>
-            ${health[availableBackend]?.version ? `
+            ${health[availableBackend]?.version && health[availableBackend].version !== '未知版本' ? `
             <div class="backend-meta">版本: ${health[availableBackend].version}</div>
             ` : ''}
             ${health[availableBackend]?.responseTime ? `
@@ -1374,6 +1456,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
                           状态: ${statusText} | 最后检查: ${timestamp}
                           ${status.responseTime ? ` | 响应时间: ${status.responseTime}ms` : ''}
                           ${status.error ? ` | 错误: ${status.error}` : ''}
+                          ${status.version && status.version !== '未知版本' ? ` | 版本: ${status.version.substring(0, 30)}` : ''}
                       </div>
                   </div>
               </div>`;
@@ -1388,6 +1471,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
                 <li>订阅转换请求: 每次请求发送通知，同一IP5分钟内不重复</li>
                 <li>服务状态变化: 服务中断/恢复时发送即时通知</li>
                 <li>IP通知冷却: ${IP_NOTIFICATION_COOLDOWN / 60000}分钟</li>
+                <li>版本信息: 自动获取并显示后端版本</li>
             </ul>
         </div>
         
@@ -1399,6 +1483,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
                 <li>并行检查: 同时检查多个后端，选择最快的</li>
                 <li>优化转发: 精简HTTP头，减少延迟</li>
                 <li>缓存策略: ${FAST_CHECK_CACHE_TTL}ms快速检查缓存</li>
+                <li>版本缓存: 5分钟版本信息缓存</li>
             </ul>
         </div>
         

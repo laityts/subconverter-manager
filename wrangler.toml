@@ -10,7 +10,7 @@ kv_namespaces = [
 # 环境变量（可在Cloudflare Dashboard中覆盖）
 [vars]
 # 后端URL列表（JSON数组格式）
-BACKEND_URLS = '["https://subapi.cmliussss.net","https://api.sub.zaoy.cn","https://subapi.sosoorg.com","https://url.v1.mk"]'
+BACKEND_URLS = '["https://url.v1.mk","https://api.sub.zaoy.cn","https://subapi.sosoorg.com","https://subapi.cmliussss.net"]'
 
 # 缓存时间（毫秒，默认60秒）
 CACHE_TTL = "60000"
