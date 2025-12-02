@@ -1,9 +1,11 @@
 // 配置常量（可通过环境变量覆盖）
 const DEFAULT_CACHE_TTL = 60 * 1000; // 健康状态缓存1分钟
-const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000; // 健康检查超时2秒（减少超时时间）
+const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000; // 健康检查超时2秒
 const TG_MESSAGE_MAX_LENGTH = 4096; // Telegram消息最大长度
 const NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 通知冷却时间5分钟
 const CONCURRENT_HEALTH_CHECKS = 5; // 并发健康检查数量
+const FAST_CHECK_TIMEOUT = 800; // 快速检查超时800ms（减少超时）
+const FAST_CHECK_CACHE_TTL = 2000; // 快速检查缓存2秒（缩短以提高新鲜度）
 
 // 默认后端列表
 const DEFAULT_BACKENDS = [];
@@ -17,7 +19,9 @@ let cache = {
   lastAvailableBackend: null,
   backendVersions: new Map(),
   lastNotificationTime: 0,
-  fastHealthChecks: new Map() // 快速健康检查缓存
+  fastHealthChecks: new Map(),
+  healthyBackendsList: [], // 新增：健康后端列表缓存
+  healthyBackendsLastUpdated: 0
 };
 
 // 生成唯一请求ID用于日志追踪
@@ -44,45 +48,70 @@ function getBackendsFromEnv(env) {
   return DEFAULT_BACKENDS;
 }
 
-// 快速健康检查（针对订阅转换请求优化）
-async function fastHealthCheck(url, requestId) {
-  const cacheKey = `fast_health_${url}`;
+// 极速健康检查（优化版本，只检查最基本功能）
+async function ultraFastHealthCheck(url, requestId) {
+  const cacheKey = `ultrafast_health_${url}`;
   const cached = cache.fastHealthChecks.get(cacheKey);
   const now = Date.now();
   
-  // 快速缓存：5秒缓存
-  if (cached && now - cached.timestamp < 5000) {
+  // 极速缓存：2秒缓存
+  if (cached && now - cached.timestamp < FAST_CHECK_CACHE_TTL) {
     return cached.result;
   }
   
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1000); // 1秒超时
+    const timeoutId = setTimeout(() => controller.abort(), FAST_CHECK_TIMEOUT); // 800ms超时
     
     const startTime = Date.now();
+    // 使用更小的请求，只获取必要的验证信息
     const response = await fetch(`${url}/version`, {
       signal: controller.signal,
       headers: { 
         'User-Agent': 'subconverter-failover-worker/1.0',
         'Accept': 'text/plain',
         'X-Request-ID': requestId
+      },
+      // 添加CF的更快连接选项
+      cf: {
+        cacheTtl: 0,
+        scrapeShield: false,
+        polish: 'off'
       }
     });
     const responseTime = Date.now() - startTime;
     
     clearTimeout(timeoutId);
     
+    // 快速验证：只需要200状态码
     const result = {
       healthy: response.status === 200,
       responseTime,
-      timestamp: now
+      timestamp: now,
+      status: response.status
     };
     
-    // 缓存快速检查结果
+    // 如果健康，尝试读取版本（但不要阻塞）
+    if (result.healthy) {
+      try {
+        // 使用非阻塞方式读取文本
+        const text = await response.text().catch(() => '');
+        result.version = text.substring(0, 30);
+      } catch (e) {
+        // 忽略版本读取错误
+      }
+    }
+    
+    // 缓存极速检查结果
     cache.fastHealthChecks.set(cacheKey, {
       result,
       timestamp: now
     });
+    
+    // 更新健康后端列表缓存
+    if (result.healthy) {
+      updateHealthyBackendsList(url, responseTime);
+    }
     
     return result;
   } catch (error) {
@@ -103,6 +132,54 @@ async function fastHealthCheck(url, requestId) {
   }
 }
 
+// 更新健康后端列表（按响应时间排序）
+function updateHealthyBackendsList(url, responseTime) {
+  if (!cache.healthyBackendsList) {
+    cache.healthyBackendsList = [];
+  }
+  
+  const existingIndex = cache.healthyBackendsList.findIndex(item => item.url === url);
+  
+  if (existingIndex >= 0) {
+    // 更新现有记录
+    cache.healthyBackendsList[existingIndex] = {
+      url,
+      responseTime,
+      lastChecked: Date.now()
+    };
+  } else {
+    // 添加新记录
+    cache.healthyBackendsList.push({
+      url,
+      responseTime,
+      lastChecked: Date.now()
+    });
+  }
+  
+  // 按响应时间排序（最快的排前面）
+  cache.healthyBackendsList.sort((a, b) => a.responseTime - b.responseTime);
+  cache.healthyBackendsLastUpdated = Date.now();
+}
+
+// 获取排序后的健康后端列表
+function getSortedHealthyBackends(forceRefresh = false) {
+  const now = Date.now();
+  
+  // 如果缓存过期（5秒）或强制刷新，返回空数组让外部重新检查
+  if (forceRefresh || !cache.healthyBackendsList || 
+      now - cache.healthyBackendsLastUpdated > 5000) {
+    return [];
+  }
+  
+  // 过滤掉检查时间过久的记录（超过10秒）
+  const freshBackends = cache.healthyBackendsList.filter(
+    item => now - item.lastChecked < 10000
+  );
+  
+  // 按响应时间排序
+  return freshBackends.sort((a, b) => a.responseTime - b.responseTime);
+}
+
 // 带缓存的详细健康检查
 async function checkBackendHealth(url, requestId, env) {
   const cacheKey = `health_${url}`;
@@ -117,8 +194,6 @@ async function checkBackendHealth(url, requestId, env) {
   if (cached && now - cached.timestamp < cacheTtl) {
     return cached.result;
   }
-  
-  console.log(`[${requestId}] 检查后端健康: ${url}`);
   
   try {
     const controller = new AbortController();
@@ -279,23 +354,209 @@ async function saveLastAvailableBackend(kv, backendUrl, requestId) {
   }
 }
 
+// 并行极速健康检查（优化版本）
+async function parallelUltraFastHealthChecks(urls, requestId) {
+  const results = new Map();
+  
+  // 使用Promise.allSettled并行检查
+  const promises = urls.map(async (url) => {
+    try {
+      const health = await ultraFastHealthCheck(url, `${requestId}-${url}`);
+      return { url, health };
+    } catch (error) {
+      return { url, health: { healthy: false, error: error.name } };
+    }
+  });
+  
+  const checkResults = await Promise.allSettled(promises);
+  
+  // 处理结果
+  checkResults.forEach(result => {
+    if (result.status === 'fulfilled') {
+      const { url, health } = result.value;
+      results.set(url, health);
+    }
+  });
+  
+  return results;
+}
+
+// 智能查找可用后端（订阅转换请求专用）- 优化版本
+async function findAvailableBackendForRequest(kv, requestId, env) {
+  const backends = await getBackends(env, requestId);
+  
+  if (backends.length === 0) {
+    return null;
+  }
+  
+  // 策略0: 检查内存中已排序的健康后端（最快路径）
+  const healthyBackends = getSortedHealthyBackends();
+  if (healthyBackends.length > 0) {
+    // 直接使用响应最快的前3个进行检查
+    const candidates = healthyBackends.slice(0, Math.min(3, healthyBackends.length));
+    
+    for (const candidate of candidates) {
+      const fastCheck = await ultraFastHealthCheck(candidate.url, `${requestId}-cached-${candidate.url}`);
+      if (fastCheck.healthy) {
+        console.log(`[${requestId}] 使用缓存健康后端: ${candidate.url}, 响应时间: ${fastCheck.responseTime}ms`);
+        await saveLastAvailableBackend(kv, candidate.url, requestId);
+        return candidate.url;
+      }
+    }
+  }
+  
+  // 策略1: 检查上次可用的后端（快速路径）
+  const lastBackend = await getLastAvailableBackend(kv, requestId);
+  if (lastBackend && backends.includes(lastBackend)) {
+    const fastCheck = await ultraFastHealthCheck(lastBackend, requestId);
+    if (fastCheck.healthy) {
+      console.log(`[${requestId}] 使用上次可用后端: ${lastBackend}, 响应时间: ${fastCheck.responseTime}ms`);
+      return lastBackend;
+    }
+  }
+  
+  // 策略2: 并行极速检查所有后端
+  console.log(`[${requestId}] 并行极速检查 ${backends.length} 个后端`);
+  
+  const checkResults = await parallelUltraFastHealthChecks(backends, requestId);
+  
+  // 找到响应最快的健康后端
+  let fastestBackend = null;
+  let fastestTime = Infinity;
+  
+  for (const [url, health] of checkResults.entries()) {
+    if (health.healthy && health.responseTime < fastestTime) {
+      fastestBackend = url;
+      fastestTime = health.responseTime;
+    }
+  }
+  
+  if (fastestBackend) {
+    console.log(`[${requestId}] 找到最快可用后端: ${fastestBackend}, 响应时间: ${fastestTime}ms`);
+    await saveLastAvailableBackend(kv, fastestBackend, requestId);
+    return fastestBackend;
+  }
+  
+  // 策略3: 如果有部分后端返回了结果但标记为不健康，尝试其中一个作为最后手段
+  console.log(`[${requestId}] 极速检查失败，尝试已返回的后端`);
+  
+  for (const [url, health] of checkResults.entries()) {
+    // 即使健康检查失败，也可能后端实际可用（比如版本检查失败但转换服务正常）
+    if (health.status === 200) { // 至少返回了200状态码
+      console.log(`[${requestId}] 尝试状态码200的后端: ${url}`);
+      await saveLastAvailableBackend(kv, url, requestId);
+      return url;
+    }
+  }
+  
+  console.log(`[${requestId}] 所有后端均不可用`);
+  return null;
+}
+
+// 处理订阅转换请求 - 优化版本
+async function handleSubconverterRequest(request, backendUrl, requestId, env) {
+  const url = new URL(request.url);
+  const backendPath = url.pathname + url.search;
+  
+  console.log(`[${requestId}] 转发请求到后端: ${backendUrl}${backendPath}`);
+  
+  try {
+    const startTime = Date.now();
+    
+    // 克隆请求，但优化一些头信息
+    const backendRequest = new Request(`${backendUrl}${backendPath}`, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      redirect: 'follow',
+      // 添加CF优化选项
+      cf: {
+        cacheEverything: false,
+        cacheTtl: 0,
+        polish: 'off',
+        scrapeShield: false
+      }
+    });
+    
+    // 优化头信息
+    backendRequest.headers.delete('host');
+    backendRequest.headers.set('host', new URL(backendUrl).host);
+    
+    // 只添加必要的追踪头
+    backendRequest.headers.set('X-Request-ID', requestId);
+    backendRequest.headers.set('X-Forwarded-By', 'subconverter-failover-worker');
+    
+    const response = await fetch(backendRequest);
+    const responseTime = Date.now() - startTime;
+    
+    console.log(`[${requestId}] 后端响应时间: ${responseTime}ms, 状态码: ${response.status}`);
+    
+    // 只复制必要的响应头
+    const responseHeaders = new Headers();
+    
+    // 复制原响应头（过滤掉一些不必要的）
+    for (const [key, value] of response.headers.entries()) {
+      if (!key.startsWith('cf-') && key !== 'server') {
+        responseHeaders.set(key, value);
+      }
+    }
+    
+    // 添加我们的追踪头
+    responseHeaders.set('X-Backend-Server', backendUrl);
+    responseHeaders.set('X-Response-Time', `${responseTime}ms`);
+    responseHeaders.set('X-Request-ID', requestId);
+    
+    // 添加缓存控制头（避免客户端缓存问题）
+    if (!responseHeaders.has('Cache-Control')) {
+      responseHeaders.set('Cache-Control', 'no-store, max-age=0');
+    }
+    
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders
+    });
+  } catch (error) {
+    console.error(`[${requestId}] 转发请求失败:`, error);
+    
+    // 快速标记该后端为不健康
+    const cacheKey = `ultrafast_health_${backendUrl}`;
+    cache.fastHealthChecks.set(cacheKey, {
+      result: {
+        healthy: false,
+        error: error.message,
+        timestamp: new Date().toISOString()
+      },
+      timestamp: Date.now()
+    });
+    
+    throw error;
+  }
+}
+
 // 并发检查多个后端健康状态（优化版本）
 async function concurrentHealthChecks(urls, requestId, env) {
   const results = {};
-  const promises = [];
   
-  for (const url of urls) {
-    promises.push(
-      (async () => {
-        const health = await checkBackendHealth(url, `${requestId}-${url}`, env);
-        results[url] = health;
-        return { url, health };
-      })()
-    );
-  }
+  // 使用并行检查
+  const promises = urls.map(async (url) => {
+    try {
+      const health = await checkBackendHealth(url, `${requestId}-${url}`, env);
+      return { url, health };
+    } catch (error) {
+      return { url, health: { healthy: false, error: error.message } };
+    }
+  });
   
-  // 等待所有检查完成
-  await Promise.allSettled(promises);
+  const checkResults = await Promise.allSettled(promises);
+  
+  // 处理结果
+  checkResults.forEach(result => {
+    if (result.status === 'fulfilled') {
+      const { url, health } = result.value;
+      results[url] = health;
+    }
+  });
   
   return results;
 }
@@ -346,76 +607,7 @@ async function performFullHealthCheck(kv, requestId, env) {
   };
 }
 
-// 智能查找可用后端（订阅转换请求专用）
-async function findAvailableBackendForRequest(kv, requestId, env) {
-  const backends = await getBackends(env, requestId);
-  
-  if (backends.length === 0) {
-    return null;
-  }
-  
-  // 策略1: 检查上次可用的后端（快速路径）
-  const lastBackend = await getLastAvailableBackend(kv, requestId);
-  if (lastBackend && backends.includes(lastBackend)) {
-    const fastCheck = await fastHealthCheck(lastBackend, requestId);
-    if (fastCheck.healthy) {
-      console.log(`[${requestId}] 使用上次可用后端: ${lastBackend}, 响应时间: ${fastCheck.responseTime}ms`);
-      return lastBackend;
-    }
-  }
-  
-  // 策略2: 并发快速检查所有后端
-  console.log(`[${requestId}] 并发快速检查 ${backends.length} 个后端`);
-  
-  const checkPromises = backends.map(async (url) => {
-    const health = await fastHealthCheck(url, `${requestId}-${url}`);
-    return { url, health };
-  });
-  
-  const checkResults = await Promise.allSettled(checkPromises);
-  
-  // 找到响应最快的健康后端
-  let fastestBackend = null;
-  let fastestTime = Infinity;
-  
-  for (const result of checkResults) {
-    if (result.status === 'fulfilled') {
-      const { url, health } = result.value;
-      if (health.healthy && health.responseTime < fastestTime) {
-        fastestBackend = url;
-        fastestTime = health.responseTime;
-      }
-    }
-  }
-  
-  if (fastestBackend) {
-    console.log(`[${requestId}] 找到最快可用后端: ${fastestBackend}, 响应时间: ${fastestTime}ms`);
-    await saveLastAvailableBackend(kv, fastestBackend, requestId);
-    return fastestBackend;
-  }
-  
-  // 策略3: 如果快速检查都失败，尝试详细检查（作为最后手段）
-  console.log(`[${requestId}] 快速检查失败，尝试详细检查`);
-  
-  for (const url of backends) {
-    try {
-      const health = await checkBackendHealth(url, requestId, env);
-      if (health.healthy) {
-        console.log(`[${requestId}] 详细检查找到可用后端: ${url}`);
-        await saveLastAvailableBackend(kv, url, requestId);
-        return url;
-      }
-    } catch (error) {
-      // 继续检查下一个
-      continue;
-    }
-  }
-  
-  console.log(`[${requestId}] 所有后端均不可用`);
-  return null;
-}
-
-// 发送Telegram通知（保持原逻辑，可优化）
+// 发送Telegram通知（保持原逻辑）
 async function sendTelegramNotification(checkResults, requestId, env) {
   const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
   const chatId = getConfig(env, 'TG_CHAT_ID', '');
@@ -596,65 +788,6 @@ async function sendServiceStatusNotification(isAvailable, backendUrl, requestId,
   }
 }
 
-// 处理订阅转换请求
-async function handleSubconverterRequest(request, backendUrl, requestId, env) {
-  const url = new URL(request.url);
-  const backendPath = url.pathname + url.search;
-  
-  console.log(`[${requestId}] 转发请求到后端: ${backendUrl}${backendPath}`);
-  
-  try {
-    const startTime = Date.now();
-    const backendRequest = new Request(`${backendUrl}${backendPath}`, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      redirect: 'follow'
-    });
-    
-    // 更新host头
-    backendRequest.headers.delete('host');
-    backendRequest.headers.set('host', new URL(backendUrl).host);
-    
-    // 添加追踪头
-    backendRequest.headers.set('X-Request-ID', requestId);
-    backendRequest.headers.set('X-Forwarded-By', 'subconverter-failover-worker');
-    backendRequest.headers.set('X-Backend-URL', backendUrl);
-    
-    const response = await fetch(backendRequest);
-    const responseTime = Date.now() - startTime;
-    
-    console.log(`[${requestId}] 后端响应时间: ${responseTime}ms, 状态码: ${response.status}`);
-    
-    // 添加后端信息到响应头
-    const modifiedHeaders = new Headers(response.headers);
-    modifiedHeaders.set('X-Backend-Server', backendUrl);
-    modifiedHeaders.set('X-Response-Time', `${responseTime}ms`);
-    modifiedHeaders.set('X-Request-ID', requestId);
-    
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: modifiedHeaders
-    });
-  } catch (error) {
-    console.error(`[${requestId}] 转发请求失败:`, error);
-    
-    // 标记该后端为不健康
-    const cacheKey = `health_${backendUrl}`;
-    cache.backendVersions.set(cacheKey, {
-      result: {
-        healthy: false,
-        error: error.message,
-        timestamp: new Date().toISOString()
-      },
-      timestamp: Date.now()
-    });
-    
-    throw error;
-  }
-}
-
 // API端点处理
 async function handleApiRequest(request, env, requestId) {
   const url = new URL(request.url);
@@ -743,7 +876,9 @@ async function handleApiRequest(request, env, requestId) {
         config: {
           cache_ttl: cacheTtl,
           health_check_timeout: healthCheckTimeout,
-          notification_cooldown: NOTIFICATION_COOLDOWN
+          notification_cooldown: NOTIFICATION_COOLDOWN,
+          fast_check_timeout: FAST_CHECK_TIMEOUT,
+          fast_check_cache_ttl: FAST_CHECK_CACHE_TTL
         },
         timestamp: new Date().toISOString()
       }), {
@@ -772,7 +907,9 @@ async function handleApiRequest(request, env, requestId) {
         lastAvailableBackend: null,
         backendVersions: new Map(),
         lastNotificationTime: 0,
-        fastHealthChecks: new Map()
+        fastHealthChecks: new Map(),
+        healthyBackendsList: [],
+        healthyBackendsLastUpdated: 0
       };
       
       // 清理KV中的健康状态
@@ -784,6 +921,63 @@ async function handleApiRequest(request, env, requestId) {
         message: '缓存已清理',
         request_id: requestId,
         timestamp: new Date().toISOString()
+      }), {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        error: error.message,
+        request_id: requestId
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      });
+    }
+  }
+  
+  // 性能测试API
+  if (url.pathname === '/api/benchmark' && request.method === 'GET') {
+    try {
+      const backends = await getBackends(env, requestId);
+      const results = {};
+      
+      // 测试每个后端的响应时间
+      const testPromises = backends.map(async (url) => {
+        const startTime = Date.now();
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000);
+          
+          const response = await fetch(`${url}/version`, {
+            signal: controller.signal,
+            headers: { 'User-Agent': 'subconverter-failover-benchmark/1.0' }
+          });
+          
+          clearTimeout(timeoutId);
+          const responseTime = Date.now() - startTime;
+          
+          results[url] = {
+            status: response.status,
+            responseTime,
+            healthy: response.status === 200
+          };
+        } catch (error) {
+          results[url] = {
+            status: 0,
+            responseTime: Date.now() - startTime,
+            healthy: false,
+            error: error.name
+          };
+        }
+      });
+      
+      await Promise.allSettled(testPromises);
+      
+      return new Response(JSON.stringify({
+        success: true,
+        request_id: requestId,
+        benchmark_time: new Date().toISOString(),
+        results
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -964,11 +1158,28 @@ function createStatusPage(requestId, backends, health, availableBackend) {
             color: #6c757d;
             font-size: 14px;
         }
+        .optimization-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .optimization-info h3 {
+            color: #856404;
+            margin-bottom: 10px;
+            font-weight: 400;
+        }
+        .optimization-info ul {
+            margin-left: 20px;
+            color: #856404;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <div class="status-container">
-        <h1>🚀 订阅转换高可用服务</h1>
+        <h1>🚀 订阅转换高可用服务 (优化版)</h1>
         
         <div class="time-info">
             北京时间: ${beijingTimeStr}
@@ -1042,6 +1253,17 @@ function createStatusPage(requestId, backends, health, availableBackend) {
         </div>
         ` : ''}
         
+        <div class="optimization-info">
+            <h3>⚡ 性能优化特性</h3>
+            <ul>
+                <li>极速健康检查: ${FAST_CHECK_TIMEOUT}ms超时</li>
+                <li>智能缓存: 响应时间排序的健康后端列表</li>
+                <li>并行检查: 同时检查多个后端，选择最快的</li>
+                <li>优化转发: 精简HTTP头，减少延迟</li>
+                <li>缓存策略: ${FAST_CHECK_CACHE_TTL}ms快速检查缓存</li>
+            </ul>
+        </div>
+        
         <div class="config-info">
             <h3>📋 配置说明</h3>
             <ul>
@@ -1049,7 +1271,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
                 <li>Telegram通知通过 <code>TG_BOT_TOKEN</code> 和 <code>TG_CHAT_ID</code> 配置</li>
                 <li>健康检查每5分钟自动执行一次</li>
                 <li>状态页面: <code>/status</code></li>
-                <li>API端点: <code>/api/health</code>, <code>/api/health-check</code>, <code>/api/config</code></li>
+                <li>API端点: <code>/api/health</code>, <code>/api/health-check</code>, <code>/api/config</code>, <code>/api/benchmark</code></li>
             </ul>
         </div>
         
@@ -1173,8 +1395,7 @@ export default {
     }
   },
   
-  // Cron触发器处理（北京时间8:00, 12:00, 16:00, 20:00, 0:00, 4:00执行）
-  // UTC时间对应：0:00, 4:00, 8:00, 12:00, 16:00, 20:00
+  // Cron触发器处理
   async scheduled(event, env, ctx) {
     const requestId = generateRequestId();
     console.log(`[${requestId}] Cron触发，开始执行健康检查`);

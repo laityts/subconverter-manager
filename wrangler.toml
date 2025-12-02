@@ -22,16 +22,27 @@ HEALTH_CHECK_TIMEOUT = "2000"
 TG_BOT_TOKEN = "7569921583:AAHITsO-87mglZqpS_ecaG6sYlVxoV5aGJU"
 TG_CHAT_ID = "-1003177803911"
 
-# 并发健康检查数量（默认3个）
+# 并发健康检查数量（默认5个）
 CONCURRENT_HEALTH_CHECKS = "5"
 
 # 通知冷却时间（毫秒，默认5分钟）
 NOTIFICATION_COOLDOWN = "300000"
+
+# 快速健康检查超时（毫秒，默认800ms）
+FAST_CHECK_TIMEOUT = "800"
+
+# 快速检查缓存时间（毫秒，默认2秒）
+FAST_CHECK_CACHE_TTL = "2000"
 
 # 触发器配置
 [triggers]
 # 每5分钟执行一次（UTC时间）
 crons = ["*/5 * * * *"]
 
+# Observability 配置
+[observability]
+enabled = true
+
 # 日志配置
-logpush = true
+[observability.logs]
+enabled = true
