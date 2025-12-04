@@ -33,6 +33,7 @@ let cache = {
   lastKVWriteTimes: new Map(),
   lastHealthNotificationStatus: null,
   lastServiceStatus: 'unknown', // 改为'unknown'，表示初始状态
+  lastAvailableBackendForStatus: null, // 新增：用于状态变化检测的可用后端
   backendWeights: new Map(), // 新增：后端权重
   backendFailureCounts: new Map(), // 新增：后端失败计数
   lastSuccessfulRequests: new Map(), // 新增：最后成功请求时间
@@ -812,8 +813,8 @@ async function checkBackendHealth(url, requestId, env) {
         });
       }
       
-      // 更新后端权重
-      updateBackendWeight(url, healthy, env);
+      // 更新后端权重（只要返回200就认为是成功）
+      updateBackendWeight(url, true, env);
     } else {
       result = { 
         healthy: false, 
@@ -1428,22 +1429,30 @@ async function performFullHealthCheck(kv, requestId, env) {
   };
 }
 
-// 检查服务状态是否发生变化
+// 检查服务状态是否发生变化（修复：正确检测后端变化）
 function hasServiceStatusChanged(checkResults) {
   const { availableBackend } = checkResults;
   const currentStatus = availableBackend ? 'available' : 'unavailable';
   
+  // 获取之前的后端和状态
+  const previousBackend = cache.lastAvailableBackendForStatus;
+  const previousStatus = cache.lastServiceStatus;
+  
   // 第一次检查，状态肯定变化了
   if (cache.lastServiceStatus === 'unknown') {
     cache.lastServiceStatus = currentStatus;
+    cache.lastAvailableBackendForStatus = availableBackend;
     return true;
   }
   
-  // 状态发生变化
-  if (cache.lastServiceStatus !== currentStatus) {
-    const previousStatus = cache.lastServiceStatus;
+  // 检查状态或后端是否发生变化
+  const statusChanged = previousStatus !== currentStatus;
+  const backendChanged = previousBackend !== availableBackend;
+  
+  if (statusChanged || backendChanged) {
+    console.log(`[状态变化检测] 服务状态从 ${previousStatus} (后端: ${previousBackend}) 变为 ${currentStatus} (后端: ${availableBackend})`);
     cache.lastServiceStatus = currentStatus;
-    console.log(`服务状态从 ${previousStatus} 变为 ${currentStatus}`);
+    cache.lastAvailableBackendForStatus = availableBackend;
     return true;
   }
   
@@ -1451,7 +1460,7 @@ function hasServiceStatusChanged(checkResults) {
   return false;
 }
 
-// 发送Telegram通知（只在状态变化时发送）
+// 发送Telegram通知（只在状态变化时发送）- 修复：最后成功时间显示
 async function sendTelegramNotification(checkResults, requestId, env) {
   const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
   const chatId = getConfig(env, 'TG_CHAT_ID', '');
@@ -1481,7 +1490,7 @@ async function sendTelegramNotification(checkResults, requestId, env) {
     message += `📅 *报告时间:* ${beijingTimeStr} (北京时间)\n`;
     message += `📊 *服务状态:* ${status}\n`;
     message += `🔧 *健康后端:* ${healthyCount}/${totalCount}\n`;
-    message += `📈 *状态变化:* ${hasServiceStatusChanged(checkResults) ? '是' : '否'}\n\n`;
+    message += `📈 *状态变化:* ${hasServiceStatusChanged(checkResults) ? '是 ✅' : '否 ❌'}\n\n`;
     
     if (availableBackend) {
       message += `🚀 *当前使用后端:*\n\`${availableBackend}\`\n`;
@@ -1509,7 +1518,19 @@ async function sendTelegramNotification(checkResults, requestId, env) {
         const failureCount = cache.backendFailureCounts.get(url) || 0;
         const requestCount = cache.requestCounts.get(url) || 0;
         const lastSuccess = cache.lastSuccessfulRequests.get(url);
-        const lastSuccessTime = lastSuccess ? Math.round((Date.now() - lastSuccess) / 1000) : '从未';
+        
+        // 修复最后成功时间显示
+        let lastSuccessTimeText = '从未';
+        if (lastSuccess) {
+          const secondsAgo = Math.round((Date.now() - lastSuccess) / 1000);
+          if (secondsAgo < 60) {
+            lastSuccessTimeText = `${secondsAgo}秒前`;
+          } else if (secondsAgo < 3600) {
+            lastSuccessTimeText = `${Math.round(secondsAgo / 60)}分钟前`;
+          } else {
+            lastSuccessTimeText = `${Math.round(secondsAgo / 3600)}小时前`;
+          }
+        }
         
         const statusEmoji = result.healthy ? '✅' : '❌';
         const statusText = result.healthy ? '正常' : '异常';
@@ -1520,7 +1541,7 @@ async function sendTelegramNotification(checkResults, requestId, env) {
         const urlObj = new URL(url);
         const hostname = urlObj.hostname;
         
-        message += `${statusEmoji} ${hostname.padEnd(25)} ${statusText.padEnd(4)} ${responseTime.padEnd(8)} 权重:${weight.toString().padEnd(3)} 失败:${failureCount.toString().padEnd(2)} 请求:${requestCount.toString().padEnd(4)} 最后成功:${lastSuccessTime}s\n`;
+        message += `${statusEmoji} ${hostname.padEnd(25)} ${statusText.padEnd(4)} ${responseTime.padEnd(8)} 权重:${weight.toString().padEnd(3)} 失败:${failureCount.toString().padEnd(2)} 请求:${requestCount.toString().padEnd(4)} 最后成功:${lastSuccessTimeText.padEnd(8)}\n`;
       }
       
       message += `\`\`\`\n`;
@@ -1560,8 +1581,11 @@ async function sendTelegramNotification(checkResults, requestId, env) {
     });
     
     if (response.ok) {
+      console.log(`[${requestId}] Telegram通知发送成功`);
       return true;
     } else {
+      const errorText = await response.text();
+      logError(`Telegram通知发送失败，状态码: ${response.status}`, new Error(errorText), requestId);
       return false;
     }
   } catch (error) {
@@ -1654,7 +1678,10 @@ async function handleApiRequest(request, env, requestId) {
           weight: cache.backendWeights.get(url) || getConfig(env, 'MAX_WEIGHT', DEFAULT_MAX_WEIGHT),
           failure_count: cache.backendFailureCounts.get(url) || 0,
           request_count: cache.requestCounts.get(url) || 0,
-          last_success: cache.lastSuccessfulRequests.get(url) || null
+          last_success: cache.lastSuccessfulRequests.get(url) || null,
+          last_success_text: cache.lastSuccessfulRequests.get(url) ? 
+            `${Math.round((Date.now() - cache.lastSuccessfulRequests.get(url)) / 1000)}秒前` : 
+            '从未'
         })),
         kv_write_stats: {
           daily_count: cache.kvWriteStats.dailyCount,
@@ -1663,7 +1690,12 @@ async function handleApiRequest(request, env, requestId) {
           last_write_time: cache.kvWriteStats.lastWriteTime,
           last_write_beijing_time: cache.kvWriteStats.lastWriteTime > 0 ? getBeijingTimeString(new Date(cache.kvWriteStats.lastWriteTime)) : null
         },
-        performance_stats: cache.performanceStats
+        performance_stats: cache.performanceStats,
+        status_change_detection: {
+          last_service_status: cache.lastServiceStatus,
+          last_available_backend_for_status: cache.lastAvailableBackendForStatus,
+          has_status_changed: cache.lastServiceStatus !== 'unknown'
+        }
       }), {
         headers: { 
           'Content-Type': 'application/json; charset=utf-8',
@@ -1691,9 +1723,15 @@ async function handleApiRequest(request, env, requestId) {
       const chatId = getConfig(env, 'TG_CHAT_ID', '');
       if (botToken && chatId) {
         // 检查服务状态是否变化
-        if (hasServiceStatusChanged(checkResults)) {
+        const statusChanged = hasServiceStatusChanged(checkResults);
+        if (statusChanged) {
+          console.log(`[${requestId}] 服务状态变化，发送Telegram通知`);
           await sendTelegramNotification(checkResults, requestId, env);
+        } else {
+          console.log(`[${requestId}] 服务状态未变化，跳过Telegram通知`);
         }
+      } else {
+        console.log(`[${requestId}] Telegram通知未配置，跳过发送`);
       }
       
       return new Response(JSON.stringify({
@@ -1704,6 +1742,7 @@ async function handleApiRequest(request, env, requestId) {
         fastest_response_time: checkResults.fastestResponseTime,
         timestamp: checkResults.timestamp,
         beijing_time: getBeijingTimeString(new Date(checkResults.timestamp)),
+        status_changed: hasServiceStatusChanged(checkResults),
         kv_write_optimized: true
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1775,6 +1814,7 @@ async function handleApiRequest(request, env, requestId) {
         lastKVWriteTimes: new Map(),
         lastHealthNotificationStatus: null,
         lastServiceStatus: 'unknown', // 修复：改为'unknown'
+        lastAvailableBackendForStatus: null, // 新增：重置状态变化检测
         backendWeights: new Map(),
         backendFailureCounts: new Map(),
         lastSuccessfulRequests: new Map(),
@@ -1913,11 +1953,21 @@ async function handleApiRequest(request, env, requestId) {
         optimization_enabled: true,
         kv_write_cooldown: getConfig(env, 'KV_WRITE_COOLDOWN', DEFAULT_KV_WRITE_COOLDOWN),
         current_service_status: cache.lastServiceStatus,
+        last_available_backend_for_status: cache.lastAvailableBackendForStatus,
+        status_change_detection: {
+          last_service_status: cache.lastServiceStatus,
+          last_available_backend_for_status: cache.lastAvailableBackendForStatus,
+          last_available_backend: cache.lastAvailableBackend
+        },
         backend_weights: Array.from(cache.backendWeights.entries()).map(([url, weight]) => ({
           url,
           weight,
           failure_count: cache.backendFailureCounts.get(url) || 0,
-          request_count: cache.requestCounts.get(url) || 0
+          request_count: cache.requestCounts.get(url) || 0,
+          last_success: cache.lastSuccessfulRequests.get(url) || null,
+          last_success_text: cache.lastSuccessfulRequests.get(url) ? 
+            `${Math.round((Date.now() - cache.lastSuccessfulRequests.get(url)) / 1000)}秒前` : 
+            '从未'
         })),
         performance_stats: cache.performanceStats,
         cache_sizes: {
@@ -2099,6 +2149,12 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
   const kvTotalWrites = cache.kvWriteStats.totalCount || 0;
   const kvLastResetDate = cache.kvWriteStats.lastResetDate || getBeijingDateString(new Date());
   const todayBeijingDate = getBeijingDateString(new Date());
+  
+  // 状态变化检测信息
+  const statusChanged = cache.lastServiceStatus !== 'unknown';
+  const statusChangeInfo = statusChanged ? 
+    `上次状态: ${cache.lastServiceStatus}, 上次后端: ${cache.lastAvailableBackendForStatus || '无'}` : 
+    '尚未检测到状态变化';
   
   const html = `
 <!DOCTYPE html>
@@ -2476,6 +2532,16 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
             text-align: center;
             margin-top: 3px;
         }
+        .status-change-info {
+            font-size: 11px;
+            color: #6c757d;
+            text-align: center;
+            margin-top: 10px;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border: 1px solid #e9ecef;
+        }
     </style>
 </head>
 <body>
@@ -2490,6 +2556,10 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
             <div class="status-badge ${availableBackend ? 'status-healthy' : (totalCount > 0 ? 'status-unhealthy' : 'status-unconfigured')}">
                 ${status}
             </div>
+        </div>
+        
+        <div class="status-change-info">
+            状态变化检测: ${statusChangeInfo}
         </div>
         
         <div class="performance-stats">
@@ -2562,7 +2632,19 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
               const failureCount = cache.backendFailureCounts.get(url) || 0;
               const requestCount = cache.requestCounts.get(url) || 0;
               const lastSuccess = cache.lastSuccessfulRequests.get(url);
-              const lastSuccessTime = lastSuccess ? Math.round((Date.now() - lastSuccess) / 1000) : '从未';
+              
+              // 修复最后成功时间显示
+              let lastSuccessTimeText = '从未';
+              if (lastSuccess) {
+                const secondsAgo = Math.round((Date.now() - lastSuccess) / 1000);
+                if (secondsAgo < 60) {
+                  lastSuccessTimeText = `${secondsAgo}秒前`;
+                } else if (secondsAgo < 3600) {
+                  lastSuccessTimeText = `${Math.round(secondsAgo / 60)}分钟前`;
+                } else {
+                  lastSuccessTimeText = `${Math.round(secondsAgo / 3600)}小时前`;
+                }
+              }
               
               const statusClass = status.healthy === true ? 'health-up' : 
                                 status.healthy === false ? 'health-down' : 'health-unknown';
@@ -2610,7 +2692,7 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
                       </div>
                       <div class="meta-grid-item">
                           <div class="meta-label">最后成功</div>
-                          <div class="meta-value">${lastSuccessTime}${lastSuccessTime === '从未' ? '' : '秒前'}</div>
+                          <div class="meta-value">${lastSuccessTimeText}</div>
                       </div>
                   </div>
                   
@@ -2880,7 +2962,8 @@ export default {
       const chatId = getConfig(env, 'TG_CHAT_ID', '');
       if (botToken && chatId) {
         // 检查服务状态是否变化
-        if (hasServiceStatusChanged(checkResults)) {
+        const statusChanged = hasServiceStatusChanged(checkResults);
+        if (statusChanged) {
           console.log(`[${requestId}] 服务状态变化，发送Telegram通知`);
           ctx.waitUntil(sendTelegramNotification(checkResults, requestId, env));
         } else {
