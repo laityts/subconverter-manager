@@ -2,11 +2,9 @@
 const DEFAULT_CACHE_TTL = 60 * 1000; // 健康状态缓存1分钟
 const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000; // 健康检查超时2秒
 const TG_MESSAGE_MAX_LENGTH = 4096; // Telegram消息最大长度
-const NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 通知冷却时间5分钟
 const CONCURRENT_HEALTH_CHECKS = 5; // 并发健康检查数量
 const FAST_CHECK_TIMEOUT = 800; // 快速检查超时800ms（减少超时）
 const FAST_CHECK_CACHE_TTL = 2000; // 快速检查缓存2秒（缩短以提高新鲜度）
-const IP_NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // IP通知冷却时间5分钟
 const KV_WRITE_COOLDOWN = 30 * 1000; // KV写入冷却时间30秒（新增）
 
 // 默认后端列表
@@ -20,7 +18,6 @@ let cache = {
   healthLastUpdated: 0,
   lastAvailableBackend: null,
   backendVersions: new Map(),
-  lastNotificationTime: 0,
   fastHealthChecks: new Map(),
   healthyBackendsList: [], // 新增：健康后端列表缓存
   healthyBackendsLastUpdated: 0,
@@ -28,6 +25,8 @@ let cache = {
   ipNotificationBackends: new Map(), // 新增：IP上次使用的后端
   backendVersionCache: new Map(), // 新增：专门存储后端版本信息
   lastKVWriteTimes: new Map(), // 新增：KV写入时间记录
+  lastHealthNotificationStatus: null, // 新增：上次通知时的健康状态
+  lastServiceStatus: 'unknown', // 新增：上次服务状态（available/unavailable）
 };
 
 // 生成唯一请求ID用于日志追踪
@@ -69,18 +68,10 @@ function canWriteKV(key, cooldown = KV_WRITE_COOLDOWN) {
 
 // 检查是否需要发送IP通知
 function shouldSendIPNotification(clientIp, backendUrl) {
-  const now = Date.now();
-  const lastTime = cache.ipNotificationTimestamps.get(clientIp);
   const lastBackend = cache.ipNotificationBackends.get(clientIp);
   
   // 如果从未发送过通知，或者后端发生变化，需要发送
-  if (!lastTime || lastBackend !== backendUrl) {
-    return true;
-  }
-  
-  // 检查冷却时间
-  const ipCooldown = IP_NOTIFICATION_COOLDOWN;
-  return now - lastTime > ipCooldown;
+  return !lastBackend || lastBackend !== backendUrl;
 }
 
 // 更新IP通知记录
@@ -145,8 +136,8 @@ async function getBackendVersion(backendUrl, requestId) {
   return '未知版本';
 }
 
-// 发送订阅转换请求通知（异步）
-async function sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, version = null) {
+// 发送订阅转换请求通知（异步）- 优化版，添加耗时统计
+async function sendSubconverterRequestNotification(clientIp, backendUrl, backendSelectionTime, responseTime, requestId, env, version = null) {
   const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
   const chatId = getConfig(env, 'TG_CHAT_ID', '');
   
@@ -165,14 +156,20 @@ async function sendSubconverterRequestNotification(clientIp, backendUrl, respons
       finalVersion = await getBackendVersion(backendUrl, requestId);
     }
     
+    // 计算总耗时
+    const totalTime = backendSelectionTime + responseTime;
+    
     // 创建通知消息
     let message = `🔔 订阅转换请求通知\n\n`;
     message += `⏰ 请求时间: ${beijingTimeStr} (北京时间)\n`;
     message += `🚀 使用后端: ${backendUrl}\n`;
-    message += `📦 版本: ${finalVersion}\n`;
-    message += `⚡ 响应时间: ${responseTime}ms\n`;
-    message += `📝 请求ID: ${requestId}\n\n`;
-    message += `⏳ IP通知冷却: 5分钟。`;
+    message += `📦 版本: ${finalVersion}\n\n`;
+    message += `⏱️ 耗时统计:\n`;
+    message += `  ├─ 后端选择耗时: ${backendSelectionTime}ms\n`;
+    message += `  ├─ 请求响应耗时: ${responseTime}ms\n`;
+    message += `  └─ 总耗时: ${totalTime}ms\n\n`;
+    message += `📝 请求ID: ${requestId}\n`;
+    message += `🌐 客户端IP: ${clientIp}`;
     
     // 发送到Telegram
     const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
@@ -644,13 +641,15 @@ async function parallelUltraFastHealthChecks(urls, requestId) {
   return results;
 }
 
-// 智能查找可用后端（订阅转换请求专用）- 优化版本
+// 智能查找可用后端（订阅转换请求专用）- 优化版本，返回后端选择和耗时
 async function findAvailableBackendForRequest(kv, requestId, env) {
   const backends = await getBackends(env, requestId);
   
   if (backends.length === 0) {
-    return null;
+    return { backend: null, selectionTime: 0 };
   }
+  
+  const selectionStartTime = Date.now();
   
   // 策略0: 检查内存中已排序的健康后端（最快路径）
   const healthyBackends = getSortedHealthyBackends();
@@ -668,7 +667,8 @@ async function findAvailableBackendForRequest(kv, requestId, env) {
           saveLastAvailableBackend(kv, candidate.url, `${requestId}-async`);
         }, 0);
         
-        return candidate.url;
+        const selectionTime = Date.now() - selectionStartTime;
+        return { backend: candidate.url, selectionTime };
       }
     }
   }
@@ -679,7 +679,8 @@ async function findAvailableBackendForRequest(kv, requestId, env) {
     const fastCheck = await ultraFastHealthCheck(lastBackend, requestId);
     if (fastCheck.healthy) {
       console.log(`[${requestId}] 使用上次可用后端: ${lastBackend}, 响应时间: ${fastCheck.responseTime}ms`);
-      return lastBackend;
+      const selectionTime = Date.now() - selectionStartTime;
+      return { backend: lastBackend, selectionTime };
     }
   }
   
@@ -707,7 +708,8 @@ async function findAvailableBackendForRequest(kv, requestId, env) {
       saveLastAvailableBackend(kv, fastestBackend, `${requestId}-async-fastest`);
     }, 0);
     
-    return fastestBackend;
+    const selectionTime = Date.now() - selectionStartTime;
+    return { backend: fastestBackend, selectionTime };
   }
   
   // 策略3: 如果有部分后端返回了结果但标记为不健康，尝试其中一个作为最后手段
@@ -723,23 +725,25 @@ async function findAvailableBackendForRequest(kv, requestId, env) {
         saveLastAvailableBackend(kv, url, `${requestId}-async-fallback`);
       }, 0);
       
-      return url;
+      const selectionTime = Date.now() - selectionStartTime;
+      return { backend: url, selectionTime };
     }
   }
   
   console.log(`[${requestId}] 所有后端均不可用`);
-  return null;
+  const selectionTime = Date.now() - selectionStartTime;
+  return { backend: null, selectionTime };
 }
 
 // 处理订阅转换请求 - 优化版本
-async function handleSubconverterRequest(request, backendUrl, requestId, env, ctx) {
+async function handleSubconverterRequest(request, backendUrl, backendSelectionTime, requestId, env, ctx) {
   const url = new URL(request.url);
   const backendPath = url.pathname + url.search;
   
   console.log(`[${requestId}] 转发请求到后端: ${backendUrl}${backendPath}`);
   
   try {
-    const startTime = Date.now();
+    const requestStartTime = Date.now();
     
     // 克隆请求，但优化一些头信息
     const backendRequest = new Request(`${backendUrl}${backendPath}`, {
@@ -765,7 +769,7 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env, ct
     backendRequest.headers.set('X-Forwarded-By', 'subconverter-failover-worker');
     
     const response = await fetch(backendRequest);
-    const responseTime = Date.now() - startTime;
+    const responseTime = Date.now() - requestStartTime;
     
     console.log(`[${requestId}] 后端响应时间: ${responseTime}ms, 状态码: ${response.status}`);
     
@@ -782,6 +786,8 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env, ct
     // 添加我们的追踪头
     responseHeaders.set('X-Backend-Server', backendUrl);
     responseHeaders.set('X-Response-Time', `${responseTime}ms`);
+    responseHeaders.set('X-Backend-Selection-Time', `${backendSelectionTime}ms`);
+    responseHeaders.set('X-Total-Time', `${backendSelectionTime + responseTime}ms`);
     responseHeaders.set('X-Request-ID', requestId);
     
     // 添加缓存控制头（避免客户端缓存问题）
@@ -799,7 +805,15 @@ async function handleSubconverterRequest(request, backendUrl, requestId, env, ct
       // 检查是否需要发送通知
       if (shouldSendIPNotification(clientIp, backendUrl)) {
         // 异步发送通知，不等待结果
-        ctx.waitUntil(sendSubconverterRequestNotification(clientIp, backendUrl, responseTime, requestId, env, null));
+        ctx.waitUntil(sendSubconverterRequestNotification(
+          clientIp, 
+          backendUrl, 
+          backendSelectionTime, 
+          responseTime, 
+          requestId, 
+          env, 
+          null
+        ));
         // 更新IP通知记录
         updateIPNotificationRecord(clientIp, backendUrl);
       }
@@ -912,18 +926,35 @@ async function performFullHealthCheck(kv, requestId, env) {
   };
 }
 
-// 发送Telegram通知（保持原逻辑）
+// 检查服务状态是否发生变化（新增）
+function hasServiceStatusChanged(checkResults) {
+  const { availableBackend } = checkResults;
+  const currentStatus = availableBackend ? 'available' : 'unavailable';
+  
+  // 第一次检查，状态肯定变化了
+  if (cache.lastServiceStatus === 'unknown') {
+    cache.lastServiceStatus = currentStatus;
+    return true;
+  }
+  
+  // 状态发生变化
+  if (cache.lastServiceStatus !== currentStatus) {
+    const previousStatus = cache.lastServiceStatus;
+    cache.lastServiceStatus = currentStatus;
+    console.log(`服务状态从 ${previousStatus} 变为 ${currentStatus}`);
+    return true;
+  }
+  
+  // 状态未变化
+  return false;
+}
+
+// 发送Telegram通知（只在状态变化时发送）
 async function sendTelegramNotification(checkResults, requestId, env) {
   const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
   const chatId = getConfig(env, 'TG_CHAT_ID', '');
   
   if (!botToken || !chatId) {
-    return false;
-  }
-  
-  // 检查通知冷却时间
-  const now = Date.now();
-  if (now - cache.lastNotificationTime < NOTIFICATION_COOLDOWN) {
     return false;
   }
   
@@ -947,7 +978,8 @@ async function sendTelegramNotification(checkResults, requestId, env) {
     let message = `🤖 *订阅转换服务状态报告*\n\n`;
     message += `📅 *报告时间:* ${beijingTimeStr} (北京时间)\n`;
     message += `📊 *服务状态:* ${status}\n`;
-    message += `🔧 *健康后端:* ${healthyCount}/${totalCount}\n\n`;
+    message += `🔧 *健康后端:* ${healthyCount}/${totalCount}\n`;
+    message += `📈 *状态变化:* ${hasServiceStatusChanged(checkResults) ? '是' : '否'}\n\n`;
     
     if (availableBackend) {
       message += `🚀 *当前使用后端:*\n\`${availableBackend}\`\n`;
@@ -1019,7 +1051,6 @@ async function sendTelegramNotification(checkResults, requestId, env) {
     });
     
     if (response.ok) {
-      cache.lastNotificationTime = now;
       return true;
     } else {
       return false;
@@ -1039,15 +1070,9 @@ async function sendServiceStatusNotification(isAvailable, backendUrl, requestId,
     return false;
   }
   
-  // 检查通知冷却时间
-  const now = Date.now();
-  if (now - cache.lastNotificationTime < NOTIFICATION_COOLDOWN) {
-    return false;
-  }
-  
   try {
     // 获取北京时间
-    const beijingTime = new Date(now + 8 * 60 * 60 * 1000);
+    const beijingTime = new Date(Date.now() + 8 * 60 * 60 * 1000);
     const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
     
     let message;
@@ -1082,7 +1107,6 @@ async function sendServiceStatusNotification(isAvailable, backendUrl, requestId,
     });
     
     if (response.ok) {
-      cache.lastNotificationTime = now;
       return true;
     } else {
       return false;
@@ -1142,11 +1166,14 @@ async function handleApiRequest(request, env, requestId) {
     try {
       const checkResults = await performFullHealthCheck(kv, requestId, env);
       
-      // 发送Telegram通知
+      // 发送Telegram通知（只在状态变化时）
       const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
       const chatId = getConfig(env, 'TG_CHAT_ID', '');
       if (botToken && chatId) {
-        await sendTelegramNotification(checkResults, requestId, env);
+        // 检查服务状态是否变化
+        if (hasServiceStatusChanged(checkResults)) {
+          await sendTelegramNotification(checkResults, requestId, env);
+        }
       }
       
       return new Response(JSON.stringify({
@@ -1183,11 +1210,9 @@ async function handleApiRequest(request, env, requestId) {
         config: {
           cache_ttl: cacheTtl,
           health_check_timeout: healthCheckTimeout,
-          notification_cooldown: NOTIFICATION_COOLDOWN,
-          ip_notification_cooldown: IP_NOTIFICATION_COOLDOWN,
           fast_check_timeout: FAST_CHECK_TIMEOUT,
           fast_check_cache_ttl: FAST_CHECK_CACHE_TTL,
-          kv_write_cooldown: KV_WRITE_COOLDOWN // 新增
+          kv_write_cooldown: KV_WRITE_COOLDOWN
         },
         timestamp: new Date().toISOString()
       }), {
@@ -1215,14 +1240,15 @@ async function handleApiRequest(request, env, requestId) {
         healthLastUpdated: 0,
         lastAvailableBackend: null,
         backendVersions: new Map(),
-        lastNotificationTime: 0,
         fastHealthChecks: new Map(),
         healthyBackendsList: [],
         healthyBackendsLastUpdated: 0,
         ipNotificationTimestamps: new Map(),
         ipNotificationBackends: new Map(),
         backendVersionCache: new Map(),
-        lastKVWriteTimes: new Map()
+        lastKVWriteTimes: new Map(),
+        lastHealthNotificationStatus: null,
+        lastServiceStatus: 'unknown'
       };
       
       // 清理KV中的健康状态
@@ -1324,7 +1350,8 @@ async function handleApiRequest(request, env, requestId) {
         })),
         total_writes_saved: cache.lastKVWriteTimes.size,
         optimization_enabled: true,
-        kv_write_cooldown: KV_WRITE_COOLDOWN
+        kv_write_cooldown: KV_WRITE_COOLDOWN,
+        current_service_status: cache.lastServiceStatus
       };
       
       return new Response(JSON.stringify({
@@ -1590,7 +1617,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
 </head>
 <body>
     <div class="status-container">
-        <h1>🚀 订阅转换高可用服务 (KV优化版)</h1>
+        <h1>🚀 订阅转换高可用服务 (优化版)</h1>
         
         <div class="time-info">
             北京时间: ${beijingTimeStr}
@@ -1679,10 +1706,10 @@ function createStatusPage(requestId, backends, health, availableBackend) {
         <div class="notification-info">
             <h3>🔔 通知系统</h3>
             <ul>
-                <li>定时健康检查: 每5分钟执行一次，发送状态报告</li>
-                <li>订阅转换请求: 每次请求发送通知，同一IP5分钟内不重复</li>
+                <li>定时健康检查: 每10分钟执行一次，只在状态变化时发送报告</li>
+                <li>订阅转换请求: 每次请求发送通知，显示耗时统计</li>
                 <li>服务状态变化: 服务中断/恢复时发送即时通知</li>
-                <li>IP通知冷却: ${IP_NOTIFICATION_COOLDOWN / 60000}分钟</li>
+                <li>耗时统计: 显示后端选择耗时和请求响应耗时</li>
                 <li>版本信息: 自动获取并显示后端版本</li>
             </ul>
         </div>
@@ -1704,7 +1731,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
             <ul>
                 <li>后端列表通过环境变量 <code>BACKEND_URLS</code> 配置</li>
                 <li>Telegram通知通过 <code>TG_BOT_TOKEN</code> 和 <code>TG_CHAT_ID</code> 配置</li>
-                <li>健康检查每5分钟自动执行一次</li>
+                <li>健康检查每10分钟自动执行一次</li>
                 <li>状态页面: <code>/status</code></li>
                 <li>API端点: <code>/api/health</code>, <code>/api/health-check</code>, <code>/api/config</code>, <code>/api/benchmark</code></li>
                 <li>KV统计: <code>/api/kv-stats</code> (查看KV写入优化效果)</li>
@@ -1724,6 +1751,7 @@ function createStatusPage(requestId, backends, health, availableBackend) {
         <div class="footer">
             <div>请求ID: <span class="request-id">${requestId}</span></div>
             <div>最后更新: ${new Date().toLocaleString('zh-CN')}</div>
+            <div>当前服务状态: ${cache.lastServiceStatus || 'unknown'}</div>
         </div>
     </div>
 </body>
@@ -1786,7 +1814,9 @@ export default {
       }
       
       const previousAvailableBackend = await getLastAvailableBackend(kv, requestId);
-      const backendUrl = await findAvailableBackendForRequest(kv, requestId, env);
+      
+      // 查找可用后端（包含耗时统计）
+      const { backend: backendUrl, selectionTime: backendSelectionTime } = await findAvailableBackendForRequest(kv, requestId, env);
       
       if (!backendUrl) {
         console.log(`[${requestId}] 无可用后端，返回503`);
@@ -1806,12 +1836,13 @@ export default {
             'Content-Type': 'text/plain; charset=utf-8',
             'Cache-Control': 'no-cache',
             'Retry-After': '30',
-            'X-Request-ID': requestId
+            'X-Request-ID': requestId,
+            'X-Backend-Selection-Time': `${backendSelectionTime}ms`
           }
         });
       }
       
-      console.log(`[${requestId}] 使用后端: ${backendUrl}`);
+      console.log(`[${requestId}] 使用后端: ${backendUrl}, 后端选择耗时: ${backendSelectionTime}ms`);
       
       // 发送服务恢复通知（如果之前是不可用的）
       if (!previousAvailableBackend) {
@@ -1822,7 +1853,14 @@ export default {
         }
       }
       
-      const response = await handleSubconverterRequest(request, backendUrl, requestId, env, ctx);
+      const response = await handleSubconverterRequest(
+        request, 
+        backendUrl, 
+        backendSelectionTime, 
+        requestId, 
+        env, 
+        ctx
+      );
       
       // 记录成功请求
       console.log(`[${requestId}] 请求处理完成，状态码: ${response.status}`);
@@ -1850,12 +1888,17 @@ export default {
       const kv = env.SUB_BACKENDS;
       const checkResults = await performFullHealthCheck(kv, requestId, env);
       
-      // 发送Telegram通知
+      // 发送Telegram通知（只在状态变化时）
       const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
       const chatId = getConfig(env, 'TG_CHAT_ID', '');
       if (botToken && chatId) {
-        console.log(`[${requestId}] 发送Telegram通知`);
-        ctx.waitUntil(sendTelegramNotification(checkResults, requestId, env));
+        // 检查服务状态是否变化
+        if (hasServiceStatusChanged(checkResults)) {
+          console.log(`[${requestId}] 服务状态变化，发送Telegram通知`);
+          ctx.waitUntil(sendTelegramNotification(checkResults, requestId, env));
+        } else {
+          console.log(`[${requestId}] 服务状态未变化，跳过Telegram通知`);
+        }
       } else {
         console.log(`[${requestId}] Telegram通知未配置，跳过发送`);
       }
