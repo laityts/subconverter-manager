@@ -1874,27 +1874,66 @@ async function handleApiRequest(request, env, requestId) {
     }
   }
   
-  // 重置权重API
-  if (url.pathname === '/api/reset-weights' && request.method === 'POST') {
+  // 重置权重API - 修复：同时支持GET和POST方法
+  if (url.pathname === '/api/reset-weights' && (request.method === 'POST' || request.method === 'GET')) {
     try {
+      // 如果是GET请求，检查是否有confirm参数
+      if (request.method === 'GET') {
+        const params = url.searchParams;
+        const confirmReset = params.get('confirm');
+        
+        if (confirmReset !== 'true') {
+          return new Response(JSON.stringify({
+            error: '请使用POST请求或添加confirm=true参数',
+            message: '重置权重需要使用POST请求。您也可以添加?confirm=true参数来确认操作。',
+            request_id: requestId,
+            usage: {
+              post_method: 'POST /api/reset-weights',
+              get_method: 'GET /api/reset-weights?confirm=true'
+            }
+          }), {
+            status: 405,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' }
+          });
+        }
+      }
+      
       const backends = await getBackends(env, requestId);
       const MAX_WEIGHT = getConfig(env, 'MAX_WEIGHT', DEFAULT_MAX_WEIGHT);
       
       // 重置所有后端权重
+      const resetResults = [];
       for (const backend of backends) {
+        const oldWeight = cache.backendWeights.get(backend) || MAX_WEIGHT;
+        const oldFailures = cache.backendFailureCounts.get(backend) || 0;
+        const oldRequests = cache.requestCounts.get(backend) || 0;
+        
         cache.backendWeights.set(backend, MAX_WEIGHT);
         cache.backendFailureCounts.set(backend, 0);
         cache.requestCounts.set(backend, 0);
         cache.lastSuccessfulRequests.set(backend, Date.now());
+        
+        resetResults.push({
+          url: backend,
+          old_weight: oldWeight,
+          old_failures: oldFailures,
+          old_requests: oldRequests,
+          new_weight: MAX_WEIGHT,
+          reset_time: new Date().toISOString()
+        });
       }
       
       // 重置加权缓存
       cache.weightedBackendCache = [];
       cache.weightedCacheLastUpdated = 0;
       
+      console.log(`[${requestId}] 权重已重置，共重置 ${backends.length} 个后端`);
+      
       return new Response(JSON.stringify({
         success: true,
-        message: '后端权重已重置',
+        message: `后端权重已重置，共重置 ${backends.length} 个后端`,
+        backends_reset: backends.length,
+        reset_results: resetResults,
         request_id: requestId,
         timestamp: new Date().toISOString(),
         beijing_time: getBeijingTimeString()
@@ -1902,6 +1941,7 @@ async function handleApiRequest(request, env, requestId) {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
     } catch (error) {
+      logError('重置权重失败', error, requestId);
       return new Response(JSON.stringify({ 
         error: error.message,
         request_id: requestId
@@ -2338,7 +2378,7 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
             <a href="/api/kv-stats" class="api-link">KV统计</a>
             <a href="/api/benchmark" class="api-link">性能测试</a>
             <a href="/api/error-logs" class="api-link">错误日志</a>
-            <a href="/api/reset-weights" class="api-link" onclick="return confirm('确定要重置所有后端权重吗？')">重置权重</a>
+            <a href="/api/reset-weights?confirm=true" class="api-link" onclick="return confirm('确定要重置所有后端权重吗？')">重置权重</a>
         </div>
         
         <div class="footer">
