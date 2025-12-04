@@ -192,6 +192,41 @@ function updateIPNotificationRecord(clientIp, backendUrl) {
   }
 }
 
+// 获取北京时间字符串（修复时间转换）
+function getBeijingTimeString(date = new Date()) {
+  try {
+    // 使用toLocaleString并指定时区，这是最可靠的方法
+    return date.toLocaleString('zh-CN', { 
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+  } catch (error) {
+    // 如果转换失败，返回ISO字符串
+    return date.toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)';
+  }
+}
+
+// 获取北京时间字符串（短格式，仅时间）
+function getBeijingTimeShort(date = new Date()) {
+  try {
+    return date.toLocaleTimeString('zh-CN', { 
+      timeZone: 'Asia/Shanghai',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+  } catch (error) {
+    return date.toISOString().substring(11, 19);
+  }
+}
+
 // 获取后端版本信息（优化版本）
 async function getBackendVersion(backendUrl, requestId) {
   const cacheKey = `version_${backendUrl}`;
@@ -433,9 +468,7 @@ async function sendSubconverterRequestNotification(clientIp, backendUrl, backend
   
   try {
     // 获取北京时间（修复时间转换）
-    const now = new Date();
-    const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-    const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+    const beijingTimeStr = getBeijingTimeString();
     
     // 如果版本为null，尝试获取版本
     let finalVersion = version;
@@ -1365,8 +1398,7 @@ async function sendTelegramNotification(checkResults, requestId, env) {
     
     // 获取北京时间（修复时间转换）
     const utcTime = new Date(timestamp);
-    const beijingTime = new Date(utcTime.getTime() + 8 * 60 * 60 * 1000);
-    const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+    const beijingTimeStr = getBeijingTimeString(utcTime);
     
     // 创建美观的消息
     let message = `🤖 *订阅转换服务状态报告*\n\n`;
@@ -1473,9 +1505,7 @@ async function sendServiceStatusNotification(isAvailable, backendUrl, requestId,
   
   try {
     // 获取北京时间（修复时间转换）
-    const now = new Date();
-    const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-    const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+    const beijingTimeStr = getBeijingTimeString();
     
     let message;
     if (isAvailable) {
@@ -1537,6 +1567,7 @@ async function handleApiRequest(request, env, requestId) {
       return new Response(JSON.stringify({
         status: 'ok',
         timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString(),
         backends_count: totalCount,
         healthy_backends: healthyCount,
         unhealthy_backends: totalCount - healthyCount,
@@ -1590,6 +1621,7 @@ async function handleApiRequest(request, env, requestId) {
         available_backend: checkResults.availableBackend,
         fastest_response_time: checkResults.fastestResponseTime,
         timestamp: checkResults.timestamp,
+        beijing_time: getBeijingTimeString(new Date(checkResults.timestamp)),
         kv_write_optimized: true
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1625,7 +1657,8 @@ async function handleApiRequest(request, env, requestId) {
           failure_weight_decrement: getConfig(env, 'FAILURE_WEIGHT_DECREMENT', DEFAULT_FAILURE_WEIGHT_DECREMENT),
           backend_stale_threshold: getConfig(env, 'BACKEND_STALE_THRESHOLD', DEFAULT_BACKEND_STALE_THRESHOLD)
         },
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString()
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -1684,7 +1717,8 @@ async function handleApiRequest(request, env, requestId) {
         success: true,
         message: '缓存已清理',
         request_id: requestId,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString()
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -1749,6 +1783,7 @@ async function handleApiRequest(request, env, requestId) {
         success: true,
         request_id: requestId,
         benchmark_time: new Date().toISOString(),
+        beijing_time: getBeijingTimeString(),
         results
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
@@ -1773,6 +1808,7 @@ async function handleApiRequest(request, env, requestId) {
         last_write_times: Array.from(cache.lastKVWriteTimes.entries()).map(([key, time]) => ({
           key,
           time: new Date(time).toISOString(),
+          beijing_time: getBeijingTimeString(new Date(time)),
           ago: Date.now() - time
         })),
         total_writes_saved: cache.lastKVWriteTimes.size,
@@ -1798,7 +1834,8 @@ async function handleApiRequest(request, env, requestId) {
         success: true,
         request_id: requestId,
         stats,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString()
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -1821,7 +1858,8 @@ async function handleApiRequest(request, env, requestId) {
         request_id: requestId,
         error_logs: cache.errorLogs.slice(-50), // 返回最近50条错误日志
         total_errors: cache.errorLogs.length,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString()
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -1858,7 +1896,8 @@ async function handleApiRequest(request, env, requestId) {
         success: true,
         message: '后端权重已重置',
         request_id: requestId,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        beijing_time: getBeijingTimeString()
       }), {
         headers: { 'Content-Type': 'application/json; charset=utf-8' }
       });
@@ -1885,10 +1924,33 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
   const totalCount = backends.length;
   const status = availableBackend ? '🟢 正常运行' : totalCount > 0 ? '🔴 服务异常' : '⚪ 未配置';
   
-  // 获取北京时间（修复时间转换）
+  // === 修复时间转换：使用正确的时区处理 ===
+  
+  // 获取当前时间的北京时间（使用正确的时区转换）
   const now = new Date();
-  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const beijingTimeStr = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
+  const beijingNowStr = getBeijingTimeString(now);
+  
+  // 获取性能统计重置时间的北京时间
+  const resetTime = new Date(cache.performanceStats.lastResetTime);
+  const beijingResetTimeStr = cache.performanceStats.lastResetTime > 0 
+    ? getBeijingTimeString(resetTime) 
+    : '从未重置';
+  
+  // 为每个后端时间转换创建一个辅助函数
+  const convertToBeijingTimeStr = (timestamp) => {
+    if (!timestamp) return '从未检查';
+    
+    try {
+      const date = new Date(timestamp);
+      // 检查是否为有效日期
+      if (isNaN(date.getTime())) {
+        return '无效时间';
+      }
+      return getBeijingTimeShort(date);
+    } catch (error) {
+      return '转换失败';
+    }
+  };
   
   const MAX_WEIGHT = getConfig(env, 'MAX_WEIGHT', DEFAULT_MAX_WEIGHT);
   const MIN_WEIGHT = getConfig(env, 'MIN_WEIGHT', DEFAULT_MIN_WEIGHT);
@@ -2126,7 +2188,7 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
         <h1>🚀 订阅转换后端状态 (优化版)</h1>
         
         <div class="time-info">
-            北京时间: ${beijingTimeStr}
+            页面生成时间 (北京时间): ${beijingNowStr}
         </div>
         
         <div class="status-header">
@@ -2210,13 +2272,8 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
               const statusText = status.healthy === true ? '正常' : 
                                 status.healthy === false ? '异常' : '未知';
               
-              // 修复：将UTC时间转换为北京时间
-              let timestamp = '从未检查';
-              if (status.timestamp) {
-                const utcDate = new Date(status.timestamp);
-                const beijingDate = new Date(utcDate.getTime() + 8 * 60 * 60 * 1000);
-                timestamp = beijingDate.toLocaleTimeString('zh-CN');
-              }
+              // 使用修复的时间转换函数
+              const timestamp = convertToBeijingTimeStr(status.timestamp);
               
               return `
               <div class="backend-item">
@@ -2286,9 +2343,9 @@ function createStatusPage(requestId, backends, health, availableBackend, env) {
         
         <div class="footer">
             <div>请求ID: <span class="request-id">${requestId}</span></div>
-            <div>最后更新: ${new Date().toLocaleString('zh-CN')}</div>
+            <div>最后更新: ${beijingNowStr}</div>
             <div>当前服务状态: ${availableBackend ? 'available' : 'unavailable'}</div>
-            <div>性能统计重置时间: ${new Date(cache.performanceStats.lastResetTime).toLocaleString('zh-CN')}</div>
+            <div>性能统计重置时间: ${beijingResetTimeStr}</div>
         </div>
     </div>
     
