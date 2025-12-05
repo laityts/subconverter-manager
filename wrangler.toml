@@ -19,10 +19,6 @@ CACHE_TTL = "60000"
 # 健康检查超时（毫秒，默认2秒）
 HEALTH_CHECK_TIMEOUT = "2000"
 
-# Telegram通知配置（可选）- 仅用于订阅转换请求通知
-TG_BOT_TOKEN = "7569921583:AAHITsO-87mglZqpS_ecaG6sYlVxoV5aGJU"
-TG_CHAT_ID = "-1003177803911"
-
 # 并发健康检查数量（默认5个）
 CONCURRENT_HEALTH_CHECKS = "5"
 

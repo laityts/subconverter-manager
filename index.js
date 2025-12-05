@@ -1,9 +1,6 @@
-// index.js - 修改后版本
-
 // 默认常量（可通过环境变量覆盖）
 const DEFAULT_CACHE_TTL = 60 * 1000; // 健康状态缓存1分钟
 const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000; // 健康检查超时2秒
-const TG_MESSAGE_MAX_LENGTH = 4096; // Telegram消息最大长度
 const DEFAULT_CONCURRENT_HEALTH_CHECKS = 5; // 并发健康检查数量
 const DEFAULT_FAST_CHECK_TIMEOUT = 800; // 快速检查超时800ms
 const DEFAULT_FAST_CHECK_CACHE_TTL = 2000; // 快速检查缓存2秒
@@ -499,30 +496,6 @@ function getBeijingDateString(date = new Date()) {
   }
 }
 
-// 检查是否需要发送IP通知
-function shouldSendIPNotification(clientIp, backendUrl) {
-  const lastBackend = cache.ipNotificationBackends.get(clientIp);
-  
-  // 如果从未发送过通知，或者后端发生变化，需要发送
-  return !lastBackend || lastBackend !== backendUrl;
-}
-
-// 更新IP通知记录
-function updateIPNotificationRecord(clientIp, backendUrl) {
-  const now = Date.now();
-  cache.ipNotificationTimestamps.set(clientIp, now);
-  cache.ipNotificationBackends.set(clientIp, backendUrl);
-  
-  // 定期清理过期的IP记录（24小时）
-  const maxAge = 24 * 60 * 60 * 1000; // 24小时
-  for (const [ip, timestamp] of cache.ipNotificationTimestamps.entries()) {
-    if (now - timestamp > maxAge) {
-      cache.ipNotificationTimestamps.delete(ip);
-      cache.ipNotificationBackends.delete(ip);
-    }
-  }
-}
-
 // 获取后端版本信息
 async function getBackendVersion(backendUrl, requestId) {
   const cacheKey = `version_${backendUrl}`;
@@ -728,14 +701,6 @@ function cleanupExpiredCache(env) {
     cache.errorLogs = cache.errorLogs.slice(-100);
   }
   
-  // 清理过期的IP记录（24小时）
-  for (const [ip, timestamp] of cache.ipNotificationTimestamps.entries()) {
-    if (now - timestamp > 24 * 60 * 60 * 1000) {
-      cache.ipNotificationTimestamps.delete(ip);
-      cache.ipNotificationBackends.delete(ip);
-    }
-  }
-  
   // 检查并重置D1写入统计（每日北京时间0点）
   const todayBeijing = getBeijingDateString(new Date());
   if (cache.d1WriteStats.lastResetDate !== todayBeijing) {
@@ -760,69 +725,6 @@ function logError(message, error, requestId) {
   
   // 控制台输出简化版本
   console.error(`[${requestId || 'system'}] ${message}: ${error?.message || error}`);
-}
-
-// 发送订阅转换请求通知（异步）- 保留此功能
-async function sendSubconverterRequestNotification(clientIp, backendUrl, backendSelectionTime, responseTime, requestId, env, version = null) {
-  const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
-  const chatId = getConfig(env, 'TG_CHAT_ID', '');
-  
-  if (!botToken || !chatId) {
-    return false;
-  }
-  
-  try {
-    // 获取北京时间
-    const beijingTimeStr = getBeijingTimeString();
-    
-    // 如果版本为null，尝试获取版本
-    let finalVersion = version;
-    if (finalVersion === null) {
-      finalVersion = await getBackendVersion(backendUrl, requestId);
-    }
-    
-    // 计算总耗时
-    const totalTime = backendSelectionTime + responseTime;
-    
-    // 创建通知消息
-    let message = `🔔 订阅转换请求通知\n\n`;
-    message += `⏰ 请求时间: ${beijingTimeStr} (北京时间)\n`;
-    message += `🚀 使用后端: ${backendUrl}\n`;
-    message += `📦 版本: ${finalVersion}\n\n`;
-    message += `⏱️ 耗时统计:\n`;
-    message += `  ├─ 后端选择耗时: ${backendSelectionTime}ms\n`;
-    message += `  ├─ 请求响应耗时: ${responseTime}ms\n`;
-    message += `  └─ 总耗时: ${totalTime}ms\n\n`;
-    message += `📝 请求ID: ${requestId}\n`;
-    message += `🌐 客户端IP: ${clientIp}`;
-    
-    // 发送到Telegram
-    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    const response = await fetch(telegramUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true,
-        disable_notification: false
-      })
-    });
-    
-    if (response.ok) {
-      console.log(`[${requestId}] 订阅转换请求通知发送成功，IP: ${clientIp}`);
-      return true;
-    } else {
-      logError(`订阅转换请求通知发送失败，状态码: ${response.status}`, null, requestId);
-      return false;
-    }
-  } catch (error) {
-    logError('订阅转换请求通知发送异常', error, requestId);
-    return false;
-  }
 }
 
 // 极速健康检查
@@ -1349,30 +1251,6 @@ async function handleSubconverterRequest(request, backendUrl, backendSelectionTi
     // 添加缓存控制头
     if (!responseHeaders.has('Cache-Control')) {
       responseHeaders.set('Cache-Control', 'no-store, max-age=0');
-    }
-    
-    // 异步发送订阅转换请求通知（不阻塞主响应）
-    if (success) {
-      // 获取客户端IP
-      const clientIp = request.headers.get('cf-connecting-ip') || 
-                       request.headers.get('x-forwarded-for') || 
-                       'unknown';
-      
-      // 检查是否需要发送通知
-      if (shouldSendIPNotification(clientIp, backendUrl)) {
-        // 异步发送通知，不等待结果
-        ctx.waitUntil(sendSubconverterRequestNotification(
-          clientIp, 
-          backendUrl, 
-          backendSelectionTime, 
-          responseTime, 
-          requestId, 
-          env, 
-          null
-        ));
-        // 更新IP通知记录
-        updateIPNotificationRecord(clientIp, backendUrl);
-      }
     }
     
     return new Response(response.body, {
@@ -2383,16 +2261,34 @@ async function createStatusPage(requestId, env) {
             margin-top: 30px;
             justify-content: center;
         }
-        .api-link {
+        .action-btn {
             background: #007bff;
             color: white;
-            padding: 10px 20px;
+            padding: 12px 20px;
             border-radius: 8px;
             text-decoration: none;
             transition: background 0.3s;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            min-width: 140px;
+            text-align: center;
+            display: inline-block;
         }
-        .api-link:hover {
+        .action-btn:hover {
             background: #0056b3;
+        }
+        .action-btn-secondary {
+            background: #28a745;
+        }
+        .action-btn-secondary:hover {
+            background: #1e7e34;
+        }
+        .action-btn-danger {
+            background: #dc3545;
+        }
+        .action-btn-danger:hover {
+            background: #c82333;
         }
         .footer {
             text-align: center;
@@ -2406,18 +2302,6 @@ async function createStatusPage(requestId, env) {
             color: #495057;
             margin-bottom: 20px;
         }
-        .check-btn {
-            background: #007bff;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 8px;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        .check-btn:hover {
-            background: #0056b3;
-        }
         .d1-stats {
             background: #d4edda;
             border: 1px solid #c3e6cb;
@@ -2429,6 +2313,13 @@ async function createStatusPage(requestId, env) {
             color: #155724;
             margin-bottom: 10px;
         }
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
     </style>
 </head>
 <body>
@@ -2437,8 +2328,7 @@ async function createStatusPage(requestId, env) {
         
         <div class="time-info">
             页面生成时间: ${beijingNowStr}<br>
-            数据更新时间: ${checkTime}<br>
-            <button class="check-btn" onclick="performHealthCheck()">🚀 手动触发健康检查</button>
+            数据更新时间: ${checkTime}
         </div>
         
         <div class="status-header">
@@ -2543,13 +2433,13 @@ async function createStatusPage(requestId, env) {
             </ul>
         </div>
         
-        <div class="api-links">
-            <a href="/api/health" class="api-link">健康状态API</a>
-            <a href="/api/config" class="api-link">配置信息</a>
-            <a href="/api/d1-stats" class="api-link">D1统计</a>
-            <a href="/api/benchmark" class="api-link">性能测试</a>
-            <button class="api-link" onclick="cleanupD1Data()" style="background: #dc3545; border: none; cursor: pointer;">清理旧数据</button>
-            <button class="api-link" onclick="resetWeights()" style="background: #28a745; border: none; cursor: pointer;">重置权重</button>
+        <div class="btn-group">
+            <button class="action-btn" onclick="performHealthCheck()">🚀 手动健康检查</button>
+            <a href="/api/health" class="action-btn">📊 健康状态API</a>
+            <a href="/api/config" class="action-btn">⚙️ 配置信息</a>
+            <a href="/api/d1-stats" class="action-btn">💾 D1统计</a>
+            <button class="action-btn action-btn-danger" onclick="cleanupD1Data()">🗑️ 清理旧数据</button>
+            <button class="action-btn action-btn-secondary" onclick="resetWeights()">🔄 重置权重</button>
         </div>
         
         <div class="footer">
@@ -2561,7 +2451,7 @@ async function createStatusPage(requestId, env) {
     
     <script>
         function performHealthCheck() {
-            const btn = document.querySelector('.check-btn');
+            const btn = document.querySelector('.action-btn');
             const originalText = btn.textContent;
             
             btn.textContent = '检查中...';
@@ -2668,61 +2558,6 @@ async function createStatusPage(requestId, env) {
   }
 }
 
-// 发送服务状态变化通知（保留订阅转换请求通知，移除定时任务通知）
-async function sendServiceStatusNotification(isAvailable, backendUrl, requestId, env) {
-  const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
-  const chatId = getConfig(env, 'TG_CHAT_ID', '');
-  
-  if (!botToken || !chatId) {
-    return false;
-  }
-  
-  try {
-    // 获取北京时间
-    const beijingTimeStr = getBeijingTimeString();
-    
-    let message;
-    if (isAvailable) {
-      message = `🟢 *服务恢复通知*\n\n`;
-      message += `🎉 订阅转换服务已恢复可用\n`;
-      message += `⏰ 时间: ${beijingTimeStr} (北京时间)\n`;
-      message += `🚀 可用后端: \`${backendUrl}\`\n`;
-      message += `✅ 服务已恢复正常，可以继续使用`;
-    } else {
-      message = `🔴 *服务中断通知*\n\n`;
-      message += `⚠️ 订阅转换服务当前不可用\n`;
-      message += `⏰ 时间: ${beijingTimeStr} (北京时间)\n`;
-      message += `❌ 所有后端服务器均不可用\n`;
-      message += `🚨 服务已中断，请及时检查`;
-    }
-    
-    // 发送到Telegram
-    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    const response = await fetch(telegramUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true,
-        disable_notification: true
-      })
-    });
-    
-    if (response.ok) {
-      return true;
-    } else {
-      return false;
-    }
-  } catch (error) {
-    logError('服务状态通知发送异常', error, requestId);
-    return false;
-  }
-}
-
 // 主处理函数
 export default {
   async fetch(request, env, ctx) {
@@ -2782,15 +2617,6 @@ export default {
       if (!backendUrl) {
         console.log(`[${requestId}] 无可用后端，返回503`);
         
-        // 发送服务不可用通知（如果之前是可用的）
-        if (previousAvailableBackend) {
-          const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
-          const chatId = getConfig(env, 'TG_CHAT_ID', '');
-          if (botToken && chatId) {
-            ctx.waitUntil(sendServiceStatusNotification(false, null, requestId, env));
-          }
-        }
-        
         return new Response('所有后端服务均不可用，请稍后重试', {
           status: 503,
           headers: { 
@@ -2804,15 +2630,6 @@ export default {
       }
       
       console.log(`[${requestId}] 使用后端: ${backendUrl}, 后端选择耗时: ${backendSelectionTime}ms`);
-      
-      // 发送服务恢复通知（如果之前是不可用的）
-      if (!previousAvailableBackend) {
-        const botToken = getConfig(env, 'TG_BOT_TOKEN', '');
-        const chatId = getConfig(env, 'TG_CHAT_ID', '');
-        if (botToken && chatId) {
-          ctx.waitUntil(sendServiceStatusNotification(true, backendUrl, requestId, env));
-        }
-      }
       
       const response = await handleSubconverterRequest(
         request, 
