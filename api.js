@@ -133,6 +133,8 @@ export async function handleApiRequest(request, env, requestId) {
     }
   }
   
+  // 在 /api/health 端点中添加以下信息：
+  
   // 健康检查API
   if (url.pathname === '/api/health' && request.method === 'GET') {
     try {
@@ -164,12 +166,31 @@ export async function handleApiRequest(request, env, requestId) {
       const loadBalancer = new SmartWeightedLoadBalancer(env);
       const weightStats = loadBalancer.getWeightStatistics();
       
+      // 【新增】获取最高权重的可用后端信息
+      let highestWeightBackend = null;
+      if (db) {
+        try {
+          highestWeightBackend = await db.getHighestWeightAvailableBackend();
+        } catch (error) {
+          logError('获取最高权重后端失败', error, requestId);
+        }
+      }
+      
       return new Response(JSON.stringify({
         status: 'ok',
         timestamp: new Date().toISOString(),
         beijing_time: getBeijingTimeString(),
         backends_count: totalCount,
         backends: backends,
+        
+        // 【新增】最高权重后端信息
+        highest_weight_backend: highestWeightBackend ? {
+          backend_url: highestWeightBackend.backend_url,
+          weight: highestWeightBackend.weight,
+          avg_response_time: highestWeightBackend.avg_response_time,
+          last_checked: highestWeightBackend.last_checked_beijing
+        } : null,
+        
         d1_stats: d1Stats,
         streaming_enabled: getConfig(env, 'ENABLE_STREAMING_PROXY', true),
         d1_data_available: {

@@ -26,6 +26,29 @@ export class SafeD1Database {
     }
   }
 
+  // 【新增】获取最高权重的可用后端（权重相同则选响应时间最快的）
+  async getHighestWeightAvailableBackend() {
+    try {
+      const { results } = await this.db
+        .prepare(`
+          SELECT * FROM backend_status 
+          WHERE healthy = 1 
+          ORDER BY weight DESC, avg_response_time ASC
+          LIMIT 1
+        `)
+        .all();
+      
+      if (results.length > 0) {
+        return results[0];
+      }
+      
+      return null;
+    } catch (error) {
+      console.error('获取最高权重后端失败:', error);
+      return null;
+    }
+  }
+
   // 保存健康检查结果到D1，并限制最多10条记录
   async saveHealthCheckResult(data, requestId) {
     try {
@@ -616,11 +639,15 @@ export class SafeD1Database {
     }
   }
 
-  // 获取状态页面数据
+  // 【修改】获取状态页面数据，使用最高权重后端
   async getStatusPageData(env) {
     try {
       // 获取所有后端状态（从 backend_status 表）
       const backendStatus = await this.getAllBackendStatus();
+      
+      // 【新增】获取最高权重的可用后端
+      const highestWeightBackend = await this.getHighestWeightAvailableBackend();
+      const currentAvailableBackend = highestWeightBackend ? highestWeightBackend.backend_url : null;
       
       // 获取订阅转换请求数据
       const recentRequests = await this.getRecentRequests(100);
@@ -667,39 +694,12 @@ export class SafeD1Database {
       const totalBackends = backendUrls.length;
       let healthyBackends = 0;
       let totalBackendWeight = 0;
-      let fastestBackend = null;
-      let fastestResponseTime = Infinity;
-      
-      // 【新增】从健康后端中挑选权重最大的作为可用后端
-      let currentAvailableBackend = null;
-      let maxWeight = 0;
       
       // 使用 backend_status 表的数据
       if (backendStatus.length > 0) {
         // 计算健康后端数量和总权重
         healthyBackends = backendStatus.filter(b => b.healthy === 1).length;
         totalBackendWeight = backendStatus.reduce((sum, b) => sum + (b.weight || 0), 0);
-        
-        // 查找最快健康后端
-        for (const backend of backendStatus) {
-          if (backend.healthy === 1 && backend.avg_response_time && backend.avg_response_time < fastestResponseTime) {
-            fastestResponseTime = backend.avg_response_time;
-            fastestBackend = backend.backend_url;
-          }
-        }
-        
-        // 【新增】从健康后端中挑选权重最大的作为可用后端
-        for (const backend of backendStatus) {
-          if (backend.healthy === 1 && backend.weight > maxWeight) {
-            maxWeight = backend.weight;
-            currentAvailableBackend = backend.backend_url;
-          }
-        }
-        
-        // 如果权重最大的后端没找到，使用最快后端
-        if (!currentAvailableBackend && fastestBackend) {
-          currentAvailableBackend = fastestBackend;
-        }
       }
       
       const avgWeight = backendStatus.length > 0 ? totalBackendWeight / backendStatus.length : 0;
@@ -728,9 +728,15 @@ export class SafeD1Database {
           avgWeight: Math.round(avgWeight)
         },
         concurrentStats: concurrentStats,
-        // 【修改】使用权重最大的健康后端作为可用后端
+        // 【修改】使用最高权重的健康后端作为可用后端
         availableBackend: currentAvailableBackend,
-        fastestResponseTime: fastestResponseTime === Infinity ? 0 : fastestResponseTime,
+        // 【新增】返回最高权重后端信息用于显示
+        highestWeightBackendInfo: highestWeightBackend ? {
+          backend_url: highestWeightBackend.backend_url,
+          weight: highestWeightBackend.weight,
+          avg_response_time: highestWeightBackend.avg_response_time,
+          last_checked_beijing: highestWeightBackend.last_checked_beijing
+        } : null,
         backendUrls: backendUrls,
         timestamp: Date.now(),
         beijingTime: getBeijingTimeString(),
@@ -762,7 +768,7 @@ export class SafeD1Database {
         },
         concurrentStats: healthCheckController.getStats(),
         availableBackend: null,
-        fastestResponseTime: 0,
+        highestWeightBackendInfo: null,
         backendUrls: [],
         timestamp: Date.now(),
         beijingTime: getBeijingTimeString(),

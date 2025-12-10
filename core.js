@@ -149,7 +149,7 @@ export async function batchHealthChecks(urls, requestId, env, skipNormalPriority
   return results;
 }
 
-// 智能查找可用后端（修改：先使用高权重后端，失败则执行完整健康检查）
+// 【修改】智能查找可用后端 - 使用最高权重的健康后端
 export async function smartFindAvailableBackend(db, requestId, env, request = null) {
   const backends = await getBackends(env, requestId);
   
@@ -160,43 +160,58 @@ export async function smartFindAvailableBackend(db, requestId, env, request = nu
   const selectionStartTime = Date.now();
   const loadBalancer = new SmartWeightedLoadBalancer(env);
   
-  // 1. 首先尝试使用数据库中高权重的健康后端
-  let highWeightBackend = null;
+  // 1. 首先尝试从数据库中获取最高权重的健康后端
+  let highestWeightBackend = null;
   if (db) {
-    highWeightBackend = await getHealthyHighWeightBackend(db, requestId);
+    highestWeightBackend = await db.getHighestWeightAvailableBackend();
   }
   
-  if (highWeightBackend) {
+  if (highestWeightBackend) {
     try {
       const priorityChecker = new PriorityHealthCheck(env);
       const fastCheck = await priorityChecker.priorityCheck(
-        highWeightBackend, 
+        highestWeightBackend.backend_url, 
         `${requestId}-highweight-check`
       );
       
       if (fastCheck.healthy) {
         const selectionTime = Date.now() - selectionStartTime;
-        console.log(`[${requestId}] 使用高权重后端: ${highWeightBackend}, 响应时间: ${fastCheck.responseTime}ms, 得分: ${fastCheck.responseTimeScore}`);
+        console.log(`[${requestId}] 使用最高权重后端: ${highestWeightBackend.backend_url}, 权重: ${highestWeightBackend.weight}, 响应时间: ${fastCheck.responseTime}ms`);
         
         // 更新该后端状态
-        const targetWeight = await loadBalancer.calculateBackendWeight(highWeightBackend, fastCheck, db, requestId);
-        await db.updateBackendStatusWithWeight(highWeightBackend, fastCheck, targetWeight, requestId);
+        const targetWeight = await loadBalancer.calculateBackendWeight(
+          highestWeightBackend.backend_url, 
+          fastCheck, 
+          db, 
+          requestId
+        );
+        await db.updateBackendStatusWithWeight(
+          highestWeightBackend.backend_url, 
+          fastCheck, 
+          targetWeight, 
+          requestId
+        );
         
         return { 
-          backend: highWeightBackend, 
+          backend: highestWeightBackend.backend_url, 
           selectionTime,
-          algorithm: 'high_weight_cached',
-          weight: targetWeight
+          algorithm: 'highest_weight_cached',
+          weight: targetWeight,
+          backendInfo: {
+            weight: highestWeightBackend.weight,
+            avg_response_time: highestWeightBackend.avg_response_time,
+            last_checked: highestWeightBackend.last_checked_beijing
+          }
         };
       } else {
-        console.log(`[${requestId}] 高权重后端检查失败: ${highWeightBackend}, 开始完整健康检查`);
+        console.log(`[${requestId}] 最高权重后端检查失败: ${highestWeightBackend.backend_url}, 开始完整健康检查`);
       }
     } catch (error) {
-      console.log(`[${requestId}] 高权重后端检查异常: ${error.message}, 开始完整健康检查`);
+      console.log(`[${requestId}] 最高权重后端检查异常: ${error.message}, 开始完整健康检查`);
     }
   }
   
-  // 2. 高权重后端不可用，执行完整健康检查
+  // 2. 如果最高权重后端不可用，执行完整健康检查
   console.log(`[${requestId}] 开始完整健康检查 ${backends.length} 个后端`);
   
   // 修复：请求处理时跳过普通优先级检查以提高响应速度
@@ -209,15 +224,39 @@ export async function smartFindAvailableBackend(db, requestId, env, request = nu
   
   let selectedBackend = null;
   let algorithm = 'weighted_round_robin';
+  let backendInfo = null;
   
   if (healthyBackends.size > 0) {
-    selectedBackend = await loadBalancer.selectOptimalBackend(
-      healthyBackends, 
-      requestId, 
-      env, 
-      db
-    );
-    algorithm = 'smart_weighted_round_robin';
+    // 选择权重最高的健康后端（权重相同则选响应时间最快的）
+    const weightedBackends = [];
+    
+    for (const [url, health] of healthyBackends.entries()) {
+      const weight = await loadBalancer.calculateBackendWeight(url, health, db, requestId);
+      weightedBackends.push({
+        url,
+        weight,
+        responseTime: health.responseTime,
+        health
+      });
+    }
+    
+    // 按权重降序排序，权重相同按响应时间升序排序
+    weightedBackends.sort((a, b) => {
+      if (b.weight !== a.weight) {
+        return b.weight - a.weight;
+      }
+      return (a.responseTime || Infinity) - (b.responseTime || Infinity);
+    });
+    
+    selectedBackend = weightedBackends[0].url;
+    algorithm = 'highest_weight_with_fallback';
+    backendInfo = {
+      weight: weightedBackends[0].weight,
+      responseTime: weightedBackends[0].responseTime,
+      selectionMethod: 'highest_weight'
+    };
+    
+    console.log(`[${requestId}] 选择权重最高的健康后端: ${selectedBackend}, 权重: ${weightedBackends[0].weight}, 响应时间: ${weightedBackends[0].responseTime}ms`);
   } else {
     console.log(`[${requestId}] 无健康后端，尝试降级策略`);
     
@@ -239,7 +278,7 @@ export async function smartFindAvailableBackend(db, requestId, env, request = nu
     console.log(`[${requestId}] 所有后端均不可用`);
   }
   
-  // 3. 【修复】无论是否选择到后端，都要更新所有后端状态
+  // 3. 无论是否选择到后端，都要更新所有后端状态
   if (db && checkResults.size > 0) {
     const updatePromises = [];
     
@@ -262,6 +301,7 @@ export async function smartFindAvailableBackend(db, requestId, env, request = nu
     backend: selectedBackend, 
     selectionTime,
     algorithm,
+    backendInfo,
     healthyCount: healthyBackends.size,
     totalChecked: checkResults.size,
     loadBalancer: loadBalancer
@@ -645,7 +685,7 @@ export async function handleSubconverterRequest(request, backendUrl, backendSele
   }
 }
 
-// 【修复】执行完整健康检查（定时任务：检查所有后端并更新backend_status）
+// 【修改】执行完整健康检查（定时任务：检查所有后端并更新backend_status）
 // 修复：1. 定时任务不跳过普通优先级检查 2. 只有当可用后端发生改变时才发送通知
 export async function performFullHealthCheck(db, requestId, env, ctx = null) {
   const backends = await getBackends(env, requestId);
@@ -664,8 +704,6 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
   // 修复：定时任务不跳过普通优先级检查，所以要传入 false
   const results = await batchHealthChecks(backends, requestId, env, false);
   
-  let fastestBackend = null;
-  let fastestTime = Infinity;
   let healthyBackends = 0;
   let loadBalancer = new SmartWeightedLoadBalancer(env);
   let weightStatistics = [];
@@ -676,10 +714,6 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
   for (const [url, health] of results.entries()) {
     if (health.healthy) {
       healthyBackends++;
-      if (health.responseTime && health.responseTime < fastestTime) {
-        fastestBackend = url;
-        fastestTime = health.responseTime;
-      }
     }
     
     // 【修复】所有后端都要计算权重并更新到 backend_status 表
@@ -722,25 +756,47 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
     console.error(`[${requestId}] 定时任务：后端状态更新失败:`, error);
   }
   
-  // 修复：只有当可用后端发生改变时才发送通知
+  // 【修改】获取最高权重的可用后端
+  let currentAvailableBackend = null;
+  let highestWeightInfo = null;
+  
+  if (db) {
+    try {
+      const highestWeightBackend = await db.getHighestWeightAvailableBackend();
+      if (highestWeightBackend) {
+        currentAvailableBackend = highestWeightBackend.backend_url;
+        highestWeightInfo = {
+          weight: highestWeightBackend.weight,
+          avg_response_time: highestWeightBackend.avg_response_time,
+          last_checked: highestWeightBackend.last_checked_beijing
+        };
+        console.log(`[${requestId}] 定时任务：当前最高权重后端: ${currentAvailableBackend}, 权重: ${highestWeightBackend.weight}, 平均响应时间: ${highestWeightBackend.avg_response_time}ms`);
+      } else {
+        console.log(`[${requestId}] 定时任务：无最高权重后端（可能所有后端都不健康）`);
+      }
+    } catch (error) {
+      console.error(`[${requestId}] 定时任务：获取最高权重后端失败:`, error);
+    }
+  }
+  
+  // 【修改】只有当可用后端发生改变时才发送通知
   let backendChanged = false;
   let previousBackend = null;
   
   if (db) {
     try {
-      // 获取上一次健康检查的最快后端
+      // 获取上一次健康检查的可用后端
       const previousCheck = await db.getLastHealthCheck();
       if (previousCheck) {
         previousBackend = previousCheck.available_backend;
         
-        // 比较当前最快后端和上一次的最快后端
-        // 需要考虑两种情况：1. 都是null 2. 都是相同地址 3. 不同地址
-        if ((!fastestBackend && !previousBackend) || (fastestBackend === previousBackend)) {
+        // 比较当前最高权重后端和上一次的可用后端
+        if ((!currentAvailableBackend && !previousBackend) || (currentAvailableBackend === previousBackend)) {
           backendChanged = false;
-          console.log(`[${requestId}] 定时任务：可用后端未改变，当前: ${fastestBackend}, 上次: ${previousBackend}`);
+          console.log(`[${requestId}] 定时任务：可用后端未改变，当前: ${currentAvailableBackend}, 上次: ${previousBackend}`);
         } else {
           backendChanged = true;
-          console.log(`[${requestId}] 定时任务：可用后端发生改变！当前: ${fastestBackend}, 上次: ${previousBackend}`);
+          console.log(`[${requestId}] 定时任务：可用后端发生改变！当前: ${currentAvailableBackend}, 上次: ${previousBackend}`);
         }
       } else {
         // 第一次检查，视为有改变
@@ -759,33 +815,34 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
     try {
       const healthCheckData = {
         results: Object.fromEntries(results),
-        available_backend: fastestBackend,
-        fastest_response_time: fastestTime,
+        available_backend: currentAvailableBackend,
+        fastest_response_time: 0, // 不再使用最快响应时间
         backend_changed: backendChanged,
-        weight_statistics: weightStatistics
+        weight_statistics: weightStatistics,
+        highest_weight_info: highestWeightInfo
       };
       
       await db.saveHealthCheckResult(healthCheckData, requestId);
       
-      console.log(`[${requestId}] 定时任务：健康检查结果已保存到D1，最快后端: ${fastestBackend}，健康后端数: ${healthyBackends}/${backends.length}，后端改变: ${backendChanged}`);
+      console.log(`[${requestId}] 定时任务：健康检查结果已保存到D1，最高权重后端: ${currentAvailableBackend}，健康后端数: ${healthyBackends}/${backends.length}，后端改变: ${backendChanged}`);
       
     } catch (error) {
       logError('保存健康检查结果到D1失败', error, requestId);
     }
   }
   
-  console.log(`[${requestId}] 定时健康检查完成，发现最快后端: ${fastestBackend}, 响应时间: ${fastestTime}ms，健康后端: ${healthyBackends}/${backends.length}，后端改变: ${backendChanged}`);
+  console.log(`[${requestId}] 定时健康检查完成，发现最高权重后端: ${currentAvailableBackend}，健康后端: ${healthyBackends}/${backends.length}，后端改变: ${backendChanged}`);
   
-  // 【修复】只有当后端发生改变且配置允许时才发送Telegram通知
+  // 【修改】只有当后端发生改变且配置允许时才发送Telegram通知
   if (db && ctx && backendChanged && getConfig(env, 'NOTIFY_ON_HEALTH_CHANGE', true)) {
     const notifier = new ResilientTelegramNotifier(env);
     
     let changeType = '';
-    if (fastestBackend && previousBackend) {
+    if (currentAvailableBackend && previousBackend) {
       changeType = '后端切换';
-    } else if (fastestBackend && !previousBackend) {
+    } else if (currentAvailableBackend && !previousBackend) {
       changeType = '后端恢复';
-    } else if (!fastestBackend && previousBackend) {
+    } else if (!currentAvailableBackend && previousBackend) {
       changeType = '所有后端不可用';
     } else {
       changeType = '健康状态变化';
@@ -794,11 +851,12 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
     const notificationData = {
       type: 'health_change',
       change_type: changeType,
-      current_backend: fastestBackend,
+      current_backend: currentAvailableBackend,
       previous_backend: previousBackend,
+      highest_weight_info: highestWeightInfo,
       healthy_backends: healthyBackends,
       total_backends: backends.length,
-      response_time: fastestTime,
+      response_time: highestWeightInfo ? highestWeightInfo.avg_response_time : 0,
       reason: `定时健康检查: ${healthyBackends}个健康/${backends.length}个总数`,
       weight_statistics: weightStatistics,
       env: env
@@ -813,8 +871,8 @@ export async function performFullHealthCheck(db, requestId, env, ctx = null) {
   
   return {
     results: Object.fromEntries(results),
-    availableBackend: fastestBackend,
-    fastestResponseTime: fastestTime,
+    availableBackend: currentAvailableBackend,
+    highestWeightInfo: highestWeightInfo,
     timestamp: new Date().toISOString(),
     backendChanged: backendChanged,
     healthyBackends: healthyBackends,

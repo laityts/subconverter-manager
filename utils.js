@@ -275,7 +275,7 @@ export function calculateResponseTimeScore(responseTime, env) {
   return Math.max(0, Math.round(score));
 }
 
-// 【美化】格式化Telegram消息（美化版）
+// 【修改】格式化Telegram消息（优化健康状态变化通知）
 export function formatTelegramMessage(notificationData) {
   const beijingTime = getBeijingTimeString();
   
@@ -333,18 +333,25 @@ export function formatTelegramMessage(notificationData) {
       message += `<b>📊 变化概况</b>\n`;
       message += `<b>🕐 时间:</b> ${beijingTime}\n`;
       message += `<b>🔄 变化类型:</b> ${notificationData.change_type}\n`;
-      message += `<b>💚 健康后端:</b> ${notificationData.healthy_backends}/${notificationData.total_backends}\n`;
-      message += `<b>⚡ 最快响应:</b> ${notificationData.response_time || 0}ms\n\n`;
+      message += `<b>💚 健康后端:</b> ${notificationData.healthy_backends}/${notificationData.total_backends}\n\n`;
+      
+      // 显示权重信息
+      if (notificationData.highest_weight_info) {
+        message += `<b>🏆 最高权重后端</b>\n`;
+        message += `<b>后端地址:</b> <code>${notificationData.current_backend}</code>\n`;
+        message += `<b>权重:</b> ${notificationData.highest_weight_info.weight}\n`;
+        message += `<b>平均响应时间:</b> ${notificationData.highest_weight_info.avg_response_time}ms\n\n`;
+      }
       
       // 只有在后端切换时才显示原后端
       if (notificationData.change_type === '后端切换' && notificationData.previous_backend) {
         message += `<b>⬅️ 原后端:</b>\n<code>${notificationData.previous_backend}</code>\n`;
-      }
-      
-      if (notificationData.current_backend) {
-        message += `<b>➡️ 现后端:</b> <code>${notificationData.current_backend}</code>\n\n`;
-      } else if (notificationData.healthy_backends === 0) {
-        message += `<b>⚠️ 当前后端:</b> <i>无可用后端</i>\n\n`;
+        message += `<b>➡️ 新后端:</b> <code>${notificationData.current_backend}</code>\n\n`;
+      } else if (!notificationData.current_backend && notificationData.previous_backend) {
+        message += `<b>⚠️ 原后端失效:</b> <code>${notificationData.previous_backend}</code>\n`;
+        message += `<b>当前状态:</b> <i>无可用后端</i>\n\n`;
+      } else if (notificationData.current_backend && !notificationData.previous_backend) {
+        message += `<b>🎉 新后端恢复:</b> <code>${notificationData.current_backend}</code>\n\n`;
       }
       
       // 显示原因

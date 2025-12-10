@@ -1447,18 +1447,19 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                 <div class="stat-label">今日写入</div>
             </div>
         </div>
-        
+
         ${availableBackend ? `
         <div class="current-backend">
-            <h3>当前使用后端</h3>
+            <h3>🏆 当前使用后端（最高权重）</h3>
             <div class="backend-url">${availableBackend}</div>
+            ${statusData.highestWeightBackendInfo ? `
             <div class="backend-meta">
-                <span class="meta-item">最快响应: ${fastestResponseTime > 0 ? fastestResponseTime + 'ms' : '未知'}</span>
-                <span class="meta-item">最后更新: ${lastUpdateTime}</span>
+                <span class="meta-item">权重: ${statusData.highestWeightBackendInfo.weight}</span>
+                <span class="meta-item">平均响应: ${statusData.highestWeightBackendInfo.avg_response_time}ms</span>
+                <span class="meta-item">最后检查: ${statusData.highestWeightBackendInfo.last_checked_beijing}</span>
                 <span class="meta-item">负载均衡算法: ${lbAlgorithmName}</span>
-                <span class="meta-item">平均后端权重: ${Math.round(avgBackendWeight)}</span>
-                <span class="meta-item">平均请求权重: ${Math.round(avgRequestWeight)}</span>
             </div>
+            ` : ''}
         </div>
         ` : totalBackends > 0 ? `
         <div class="current-backend" style="background: #f8d7da; border-color: #f5c6cb;">
