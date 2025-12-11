@@ -46,8 +46,8 @@ STREAMING_CHUNK_SIZE = "8192"
 
 # 触发器配置
 [triggers]
-# 每2分钟执行一次（UTC时间）- 检查所有后端并更新backend_status表
-crons = ["*/2 * * * *"]
+# 每5分钟执行一次（UTC时间）- 检查所有后端并更新backend_status表
+crons = ["*/5 * * * *"]
 
 # Observability 配置
 [observability]
