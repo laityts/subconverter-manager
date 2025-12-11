@@ -777,133 +777,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             font-weight: 600;
         }
         
-        /* ============= 美化权重统计部分 ============= */
-        .weight-stats-section {
-            margin-bottom: 25px;
-        }
-        
-        .weight-stats-section h3 {
-            color: #ff6b35;
-            margin-bottom: 15px;
-            font-size: 17px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding-bottom: 8px;
-            border-bottom: 2px solid rgba(255, 107, 53, 0.2);
-        }
-        
-        .weight-stats-section h3:before {
-            content: "⚖️";
-            font-size: 20px;
-        }
-        
-        .weight-stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px;
-            margin-bottom: 16px;
-        }
-        
-        .weight-stat-card {
-            background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%);
-            border-radius: 12px;
-            padding: 16px;
-            color: #333;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(255, 107, 53, 0.15);
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-        
-        .weight-stat-card:nth-child(2) {
-            background: linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%);
-        }
-        
-        .weight-stat-card:nth-child(3) {
-            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
-        }
-        
-        .weight-stat-card:nth-child(4) {
-            background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
-        }
-        
-        .weight-stat-card:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 8px 25px rgba(255, 107, 53, 0.25);
-        }
-        
-        .weight-stat-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 4px;
-            background: linear-gradient(90deg, #ff6b35, #ff9a9e);
-        }
-        
-        .weight-stat-card:nth-child(2)::before {
-            background: linear-gradient(90deg, #4facfe, #00f2fe);
-        }
-        
-        .weight-stat-card:nth-child(3)::before {
-            background: linear-gradient(90deg, #ff9a9e, #fecfef);
-        }
-        
-        .weight-stat-card:nth-child(4)::before {
-            background: linear-gradient(90deg, #43e97b, #38f9d7);
-        }
-        
-        .weight-stat-value {
-            font-size: 32px;
-            font-weight: 800;
-            margin-bottom: 8px;
-            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-        
-        .weight-stat-value .icon {
-            font-size: 24px;
-            opacity: 0.9;
-        }
-        
-        .weight-stat-label {
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 10px;
-            color: #555;
-        }
-        
-        .weight-stat-details {
-            display: flex;
-            justify-content: space-between;
-            font-size: 11px;
-            border-top: 1px solid rgba(255, 255, 255, 0.3);
-            padding-top: 10px;
-        }
-        
-        .weight-stat-detail {
-            text-align: center;
-            flex: 1;
-        }
-        
-        .weight-stat-detail-value {
-            font-size: 13px;
-            font-weight: 700;
-            margin-bottom: 2px;
-        }
-        
-        .weight-stat-detail-label {
-            opacity: 0.8;
-            font-size: 10px;
-        }
-        
         /* ============= 美化D1数据库统计部分 ============= */
         .d1-stats-section {
             margin-bottom: 25px;
@@ -1167,19 +1040,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                 font-size: 11px;
             }
             
-            /* 移动端优化权重统计 */
-            .weight-stats-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .weight-stat-card {
-                padding: 14px;
-            }
-            
-            .weight-stat-value {
-                font-size: 28px;
-            }
-            
             /* 移动端优化D1统计 */
             .d1-stats-grid {
                 grid-template-columns: 1fr;
@@ -1223,10 +1083,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                 padding: 16px;
             }
             
-            .weight-stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
             .d1-stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
@@ -1238,10 +1094,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             }
             
             .telegram-stats-cards {
-                grid-template-columns: repeat(4, 1fr);
-            }
-            
-            .weight-stats-grid {
                 grid-template-columns: repeat(4, 1fr);
             }
             
@@ -1298,28 +1150,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             .weight-bar { background: #3d3d3d; }
             .weight-fill { background: linear-gradient(90deg, #28a745, #17a2b8); }
             .weight-value { color: #d1d5db; }
-            
-            /* 深色模式下的权重统计卡片 */
-            .weight-stat-card {
-                background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
-                color: #e0e0e0;
-            }
-            
-            .weight-stat-card:nth-child(2) {
-                background: linear-gradient(135deg, #2c5282 0%, #3182ce 100%);
-            }
-            
-            .weight-stat-card:nth-child(3) {
-                background: linear-gradient(135deg, #744210 0%, #d69e2e 100%);
-            }
-            
-            .weight-stat-card:nth-child(4) {
-                background: linear-gradient(135deg, #22543d 0%, #38a169 100%);
-            }
-            
-            .weight-stat-label {
-                color: #d1d5db;
-            }
             
             /* 深色模式下的D1统计卡片 */
             .d1-stat-card {
@@ -1647,85 +1477,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             </div>
         </div>
         ` : ''}
-        
-        <!-- ============= 美化权重统计部分 ============= -->
-        <div class="weight-stats-section">
-            <h3>权重统计</h3>
-            
-            <div class="weight-stats-grid">
-                <div class="weight-stat-card">
-                    <div class="weight-stat-value">
-                        <span class="icon">⚖️</span>
-                        <span>${Math.round(avgBackendWeight)}</span>
-                    </div>
-                    <div class="weight-stat-label">平均后端权重</div>
-                    <div class="weight-stat-details">
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${maxWeight}</div>
-                            <div class="weight-stat-detail-label">最大权重</div>
-                        </div>
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${minWeight}</div>
-                            <div class="weight-stat-detail-label">最小权重</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="weight-stat-card">
-                    <div class="weight-stat-value">
-                        <span class="icon">📊</span>
-                        <span>${Math.round(avgRequestWeight)}</span>
-                    </div>
-                    <div class="weight-stat-label">平均请求权重</div>
-                    <div class="weight-stat-details">
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${baseWeight}</div>
-                            <div class="weight-stat-detail-label">基准权重</div>
-                        </div>
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${weightRecoveryRate}</div>
-                            <div class="weight-stat-detail-label">恢复速率/分</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="weight-stat-card">
-                    <div class="weight-stat-value">
-                        <span class="icon">⚡</span>
-                        <span>${weightAdjustmentFactor}</span>
-                    </div>
-                    <div class="weight-stat-label">权重调整因子</div>
-                    <div class="weight-stat-details">
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${healthyBackends}</div>
-                            <div class="weight-stat-detail-label">健康后端</div>
-                        </div>
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${totalBackends}</div>
-                            <div class="weight-stat-detail-label">总后端数</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="weight-stat-card">
-                    <div class="weight-stat-value">
-                        <span class="icon">🔄</span>
-                        <span>${lbAlgorithmName}</span>
-                    </div>
-                    <div class="weight-stat-label">负载均衡算法</div>
-                    <div class="weight-stat-details">
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${streamingEnabled ? '✅' : '❌'}</div>
-                            <div class="weight-stat-detail-label">流式代理</div>
-                        </div>
-                        <div class="weight-stat-detail">
-                            <div class="weight-stat-detail-value">${todayRequestCount}</div>
-                            <div class="weight-stat-detail-label">今日请求</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
         
         <!-- ==== 优化的Telegram通知部分 ==== -->
         <div class="telegram-stats-section">
