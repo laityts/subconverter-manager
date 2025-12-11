@@ -7,6 +7,16 @@ import {
 } from './utils.js';
 import { healthCheckController } from './concurrency.js';
 
+// 简单的HTML转义函数
+function escapeHtmlSimple(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/&/g, '&amp;')
+             .replace(/</g, '&lt;')
+             .replace(/>/g, '&gt;')
+             .replace(/"/g, '&quot;')
+             .replace(/'/g, '&#039;');
+}
+
 // 创建增强状态页面
 export async function createEnhancedStatusPage(requestId, env, db) {
   if (!db) {
@@ -435,6 +445,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
         .notification-message.expanded {
             max-height: none;
             -webkit-line-clamp: unset;
+            overflow: visible;
         }
         
         /* 通知详情 */
@@ -1447,19 +1458,18 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                 <div class="stat-label">今日写入</div>
             </div>
         </div>
-
+        
         ${availableBackend ? `
         <div class="current-backend">
-            <h3>🏆 当前使用后端（最高权重）</h3>
+            <h3>当前使用后端</h3>
             <div class="backend-url">${availableBackend}</div>
-            ${statusData.highestWeightBackendInfo ? `
             <div class="backend-meta">
-                <span class="meta-item">权重: ${statusData.highestWeightBackendInfo.weight}</span>
-                <span class="meta-item">平均响应: ${statusData.highestWeightBackendInfo.avg_response_time}ms</span>
-                <span class="meta-item">最后检查: ${statusData.highestWeightBackendInfo.last_checked_beijing}</span>
+                <span class="meta-item">最快响应: ${fastestResponseTime > 0 ? fastestResponseTime + 'ms' : '未知'}</span>
+                <span class="meta-item">最后更新: ${lastUpdateTime}</span>
                 <span class="meta-item">负载均衡算法: ${lbAlgorithmName}</span>
+                <span class="meta-item">平均后端权重: ${Math.round(avgBackendWeight)}</span>
+                <span class="meta-item">平均请求权重: ${Math.round(avgRequestWeight)}</span>
             </div>
-            ` : ''}
         </div>
         ` : totalBackends > 0 ? `
         <div class="current-backend" style="background: #f8d7da; border-color: #f5c6cb;">
@@ -1684,7 +1694,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                             <div class="telegram-stat-item-label">今日</div>
                         </div>
                         <div class="telegram-stat-item">
-                            <div class="telegram-stat-item-value">${Math.min(statusData.telegramNotifications.length, 5)}</div>
+                            <div class="telegram-stat-item-value">${Math.min(statusData.telegramNotifications.length, 3)}</div>
                             <div class="telegram-stat-item-label">最近</div>
                         </div>
                     </div>
@@ -1739,7 +1749,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
         
         <div class="telegram-notifications-container">
             <div class="telegram-notifications-header">
-                <h4>最近Telegram通知</h4>
+                <h4>最近Telegram通知 (显示最新3条)</h4>
                 <div class="notification-filter" id="notificationFilter">
                     <button class="filter-btn active" data-filter="all">全部</button>
                     <button class="filter-btn" data-filter="request">请求通知</button>
@@ -1750,7 +1760,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             
             ${statusData.telegramNotifications.length > 0 ? `
             <div class="telegram-notifications-list" id="notificationsList">
-                ${statusData.telegramNotifications.slice(0, 5).map(notification => {
+                ${statusData.telegramNotifications.slice(0, 3).map(notification => {
                     const isSuccess = notification.success === 1;
                     const type = notification.notification_type || 'unknown';
                     const typeClass = type === 'request' ? 'request' : 
@@ -1768,8 +1778,9 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                     const fullTime = time;
                     
                     const message = notification.message || '无消息内容';
+                    const escapedMessage = escapeHtmlSimple(message);
                     const shortMessage = message.length > 80 ? message.substring(0, 80) + '...' : message;
-                    const fullMessage = message;
+                    const escapedShortMessage = escapeHtmlSimple(shortMessage);
                     
                     const requestId = notification.request_id || '';
                     const clientIp = notification.client_ip || '';
@@ -1788,8 +1799,8 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                         <span class="notification-time" title="${fullTime}">${shortTime}</span>
                     </div>
                     
-                    <div class="notification-message" id="message-${notificationId}">
-                        ${shortMessage}
+                    <div class="notification-message" id="message-${notificationId}" data-full="${escapedMessage}">
+                        ${escapedShortMessage}
                     </div>
                     
                     <div class="notification-details">
@@ -1959,6 +1970,50 @@ export async function createEnhancedStatusPage(requestId, env, db) {
     </div>
     
     <script>
+        // 简单的HTML解码函数
+        function decodeHtmlSimple(html) {
+            const txt = document.createElement('textarea');
+            txt.innerHTML = html;
+            return txt.value;
+        }
+
+        // 切换通知消息展开/收起
+        function toggleNotificationMessage(id) {
+            const messageElement = document.getElementById('message-' + id);
+            const button = document.querySelector('[data-id="' + id + '"]');
+            
+            if (!messageElement || !button) return;
+            
+            const isExpanded = messageElement.classList.contains('expanded');
+            const encodedFullMessage = messageElement.getAttribute('data-full');
+            const fullMessage = decodeHtmlSimple(encodedFullMessage);
+            
+            if (isExpanded) {
+                // 收起
+                const shortMessage = fullMessage.length > 80 ? 
+                    fullMessage.substring(0, 80) + '...' : 
+                    fullMessage;
+                messageElement.textContent = shortMessage;
+                messageElement.classList.remove('expanded');
+                
+                const expandText = button.querySelector('.expand-text');
+                if (expandText) expandText.textContent = '展开详情';
+                
+                const expandIcon = button.querySelector('.expand-icon');
+                if (expandIcon) expandIcon.textContent = '📖';
+            } else {
+                // 展开
+                messageElement.textContent = fullMessage;
+                messageElement.classList.add('expanded');
+                
+                const expandText = button.querySelector('.expand-text');
+                if (expandText) expandText.textContent = '收起详情';
+                
+                const expandIcon = button.querySelector('.expand-icon');
+                if (expandIcon) expandIcon.textContent = '📘';
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', function() {
             // 按钮事件绑定
             const healthCheckBtn = document.getElementById('healthCheckBtn');
@@ -2059,9 +2114,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                 });
             });
             
-            // 初始化消息展开状态
-            initNotificationMessages();
-            
             // 为所有展开按钮添加点击事件
             document.querySelectorAll('.notification-expand-btn').forEach(btn => {
                 btn.addEventListener('click', function(e) {
@@ -2106,59 +2158,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             }
         }
         
-        // 初始化通知消息展开状态
-        function initNotificationMessages() {
-            const expandButtons = document.querySelectorAll('.notification-expand-btn');
-            expandButtons.forEach(btn => {
-                const messageId = btn.getAttribute('data-id');
-                const messageElement = document.getElementById('message-' + messageId);
-                if (messageElement) {
-                    // 保存完整消息
-                    const fullMessage = messageElement.innerHTML;
-                    messageElement.setAttribute('data-full', fullMessage);
-                    
-                    // 设置初始状态
-                    messageElement.classList.remove('expanded');
-                }
-            });
-        }
-        
-        // 切换通知消息展开/收起 - 修复：现在在全局作用域中
-        window.toggleNotificationMessage = function(id) {
-            const messageElement = document.getElementById('message-' + id);
-            const button = document.querySelector('[data-id="' + id + '"]');
-            
-            if (!messageElement || !button) return;
-            
-            const isExpanded = messageElement.classList.contains('expanded');
-            const fullMessage = messageElement.getAttribute('data-full') || messageElement.innerHTML;
-            
-            if (isExpanded) {
-                // 收起
-                const shortMessage = fullMessage.length > 80 ? 
-                    fullMessage.substring(0, 80) + '...' : 
-                    fullMessage;
-                messageElement.innerHTML = shortMessage;
-                messageElement.classList.remove('expanded');
-                
-                const expandText = button.querySelector('.expand-text');
-                if (expandText) expandText.textContent = '展开详情';
-                
-                const expandIcon = button.querySelector('.expand-icon');
-                if (expandIcon) expandIcon.textContent = '📖';
-            } else {
-                // 展开
-                messageElement.innerHTML = fullMessage;
-                messageElement.classList.add('expanded');
-                
-                const expandText = button.querySelector('.expand-text');
-                if (expandText) expandText.textContent = '收起详情';
-                
-                const expandIcon = button.querySelector('.expand-icon');
-                if (expandIcon) expandIcon.textContent = '📘';
-            }
-        }
-        
         function performHealthCheck() {
             const btn = document.getElementById('healthCheckBtn');
             const originalText = btn.textContent;
@@ -2185,7 +2184,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                     btn.disabled = false;
                 }
             })
-            .catch(error) {
+            .catch(error => {
                 showToast('请求失败：' + error.message, 'error');
                 btn.innerHTML = originalText;
                 btn.disabled = false;
@@ -2220,7 +2219,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                     btn.disabled = false;
                 }
             })
-            .catch(error) {
+            .catch(error => {
                 showToast('请求失败：' + error.message, 'error');
                 btn.innerHTML = originalText;
                 btn.disabled = false;
@@ -2255,7 +2254,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                     btn.disabled = false;
                 }
             })
-            .catch(error) {
+            .catch(error => {
                 showToast('请求失败：' + error.message, 'error');
                 btn.innerHTML = originalText;
                 btn.disabled = false;
@@ -2291,7 +2290,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                         btn.disabled = false;
                     }
                 })
-                .catch(error) {
+                .catch(error => {
                     showToast('请求失败：' + error.message, 'error');
                     btn.innerHTML = originalText;
                     btn.disabled = false;
@@ -2326,9 +2325,9 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                         showToast('数据清理失败：' + (data.error || '未知错误'), 'error');
                         btn.innerHTML = originalText;
                         btn.disabled = false;
-                }
+                    }
                 })
-                .catch(error) {
+                .catch(error => {
                     showToast('请求失败：' + error.message, 'error');
                     btn.innerHTML = originalText;
                     btn.disabled = false;
