@@ -168,7 +168,7 @@ export class SafeD1Database {
     }
   }
 
-  // 智能更新后端状态和权重（使用北京时间，修复字段名）
+  // 【修正】智能更新后端状态和权重 - 使用正确的累积成功率计算
   async updateBackendStatusWithWeight(backendUrl, healthResult, targetWeight, requestId) {
     try {
       // 先查询现有记录
@@ -189,32 +189,26 @@ export class SafeD1Database {
         // 更新现有记录
         const newFailureCount = safeHealthResult.healthy ? 0 : (existing.failure_count || 0) + 1;
         const newRequestCount = (existing.request_count || 0) + 1;
+        const newSuccessCount = safeHealthResult.healthy ? 
+          (existing.success_count || 0) + 1 : 
+          (existing.success_count || 0);
         const newWeight = targetWeight;
         
-        // 计算成功率和平均响应时间
-        let successRate = existing.success_rate || 1.0;
-        let avgResponseTime = existing.avg_response_time || 0;
+        // 【修正点】正确计算累积成功率：成功次数 ÷ 总请求数
+        let successRate = 0;
+        if (newRequestCount > 0) {
+          successRate = newSuccessCount / newRequestCount;
+        }
         
-        if (safeHealthResult.healthy) {
-          // 更新成功率（滑动窗口）
-          const windowSize = getConfig(this.env, 'RESPONSE_TIME_WINDOW', 10);
-          const successCount = (existing.success_count || 0) + 1;
-          const totalInWindow = Math.min(windowSize, newRequestCount);
-          successRate = successCount / totalInWindow;
-          
-          // 更新平均响应时间（指数加权移动平均）
+        // 计算平均响应时间（指数加权移动平均）
+        let avgResponseTime = existing.avg_response_time || 0;
+        if (safeHealthResult.healthy && safeHealthResult.responseTime) {
           const alpha = 0.3; // 平滑因子
           if (avgResponseTime === 0) {
             avgResponseTime = safeHealthResult.responseTime || 0;
           } else {
             avgResponseTime = alpha * (safeHealthResult.responseTime || 0) + (1 - alpha) * avgResponseTime;
           }
-        } else {
-          // 失败时更新成功率
-          const windowSize = getConfig(this.env, 'RESPONSE_TIME_WINDOW', 10);
-          const successCount = existing.success_count || 0;
-          const totalInWindow = Math.min(windowSize, newRequestCount);
-          successRate = totalInWindow > 0 ? successCount / totalInWindow : 0;
         }
         
         const lastSuccessBeijing = safeHealthResult.healthy ? beijingTime : existing.last_success_beijing;
@@ -244,8 +238,8 @@ export class SafeD1Database {
           newWeight,
           newFailureCount,
           newRequestCount,
-          safeHealthResult.healthy ? (existing.success_count || 0) + 1 : (existing.success_count || 0),
-          successRate,
+          newSuccessCount,
+          successRate,                      // 【修正点】使用正确的累积成功率
           Math.round(avgResponseTime),
           lastSuccessBeijing,                // last_success_beijing (北京时间)
           safeHealthResult.version || existing.version || 'subconverter',
@@ -260,8 +254,12 @@ export class SafeD1Database {
         // 插入新记录
         const initialWeight = targetWeight;
         const initialFailureCount = safeHealthResult.healthy ? 0 : 1;
+        const initialRequestCount = 1;
         const initialSuccessCount = safeHealthResult.healthy ? 1 : 0;
-        const initialSuccessRate = safeHealthResult.healthy ? 1.0 : 0;
+        
+        // 【修正点】正确计算初始累积成功率
+        const initialSuccessRate = initialRequestCount > 0 ? 
+          initialSuccessCount / initialRequestCount : 0;
         
         const stmt = this.db.prepare(`
           INSERT INTO backend_status 
@@ -275,9 +273,9 @@ export class SafeD1Database {
           beijingTime,                      // last_checked_beijing (北京时间)
           initialWeight,
           initialFailureCount,
-          1,                                // request_count
-          initialSuccessCount,
-          initialSuccessRate,
+          initialRequestCount,              // 【修正点】正确设置请求数
+          initialSuccessCount,              // 【修正点】正确设置成功次数
+          initialSuccessRate,               // 【修正点】使用正确的初始累积成功率
           safeHealthResult.responseTime || 0,
           safeHealthResult.healthy ? beijingTime : null, // last_success_beijing (北京时间)
           safeHealthResult.version || 'subconverter',
@@ -286,7 +284,7 @@ export class SafeD1Database {
           beijingTime                       // updated_at_beijing (北京时间)
         ).run();
         
-        console.log(`[${requestId}] 插入新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 初始权重: ${initialWeight}, 当前响应时间: ${safeHealthResult.responseTime || 0}ms, 创建时间: ${beijingTime}`);
+        console.log(`[${requestId}] 插入新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 初始权重: ${initialWeight}, 初始成功率: ${(initialSuccessRate * 100).toFixed(1)}%, 当前响应时间: ${safeHealthResult.responseTime || 0}ms, 创建时间: ${beijingTime}`);
       }
       
       return true;

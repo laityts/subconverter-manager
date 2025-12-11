@@ -275,6 +275,20 @@ export function calculateResponseTimeScore(responseTime, env) {
   return Math.max(0, Math.round(score));
 }
 
+// 【新增】成功率计算验证函数
+export function debugSuccessRateCalculation(requestCount, successCount, successRate) {
+  if (requestCount > 0) {
+    const calculatedRate = successCount / requestCount;
+    const discrepancy = Math.abs(successRate - calculatedRate);
+    
+    if (discrepancy > 0.001) {
+      console.warn(`⚠️ 成功率计算不一致: 请求数=${requestCount}, 成功数=${successCount}, 存储率=${(successRate * 100).toFixed(1)}%, 计算率=${(calculatedRate * 100).toFixed(1)}%, 差异=${(discrepancy * 100).toFixed(3)}%`);
+      return false;
+    }
+  }
+  return true;
+}
+
 // 获取状态表情符号
 function getStatusEmoji(status, value) {
   // 根据状态和值返回对应的表情符号
