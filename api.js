@@ -166,7 +166,7 @@ export async function handleApiRequest(request, env, requestId) {
       const loadBalancer = new SmartWeightedLoadBalancer(env);
       const weightStats = loadBalancer.getWeightStatistics();
       
-      // 【新增】获取最高权重的可用后端信息
+      // 【新增】获取最高权重的可用后端信息（权重相同按响应时间排序）
       let highestWeightBackend = null;
       if (db) {
         try {
@@ -183,11 +183,12 @@ export async function handleApiRequest(request, env, requestId) {
         backends_count: totalCount,
         backends: backends,
         
-        // 【新增】最高权重后端信息
+        // 【新增】最高权重后端信息，包括当前响应时间
         highest_weight_backend: highestWeightBackend ? {
           backend_url: highestWeightBackend.backend_url,
           weight: highestWeightBackend.weight,
           avg_response_time: highestWeightBackend.avg_response_time,
+          current_response_time: highestWeightBackend.response_time, // 当前响应时间
           last_checked: highestWeightBackend.last_checked_beijing
         } : null,
         

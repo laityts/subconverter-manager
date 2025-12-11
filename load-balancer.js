@@ -189,7 +189,7 @@ export class SmartWeightedLoadBalancer {
     return finalWeight;
   }
 
-  // 选择最优后端（加权轮询）
+  // 【修改】选择最优后端（加权轮询，权重相同按响应时间排序）
   async selectOptimalBackend(availableBackends, requestId, env, db) {
     const backends = Array.from(availableBackends.entries());
     
@@ -216,8 +216,13 @@ export class SmartWeightedLoadBalancer {
       
       const finalWeight = Math.max(1, Math.round(weight * weightMultiplier));
       
+      // 【修改】根据权重创建加权列表，权重高的有更多机会被选中
       for (let i = 0; i < finalWeight; i++) {
-        weightedBackends.push(url);
+        weightedBackends.push({
+          url,
+          weight: finalWeight,
+          responseTime: health.responseTime || 9999
+        });
       }
       
       backendWeights.push({
@@ -233,15 +238,22 @@ export class SmartWeightedLoadBalancer {
       return null;
     }
     
-    // 使用加权随机选择
-    const index = Math.floor(Math.random() * weightedBackends.length);
-    const selectedBackend = weightedBackends[index];
+    // 【修改】按权重降序、响应时间升序排序
+    weightedBackends.sort((a, b) => {
+      if (b.weight !== a.weight) {
+        return b.weight - a.weight;
+      }
+      return (a.responseTime || 9999) - (b.responseTime || 9999);
+    });
+    
+    // 选择权重最高且响应时间最短的后端
+    const selectedBackend = weightedBackends[0].url;
     
     // 记录选择统计
     const selectedWeightInfo = backendWeights.find(b => b.url === selectedBackend);
     const totalWeight = weightedBackends.length;
     
-    console.log(`[${requestId}] 加权轮询选择: ${selectedBackend}, 权重: ${selectedWeightInfo?.weight || 1}/${totalWeight}, 选中概率: ${((selectedWeightInfo?.weight || 1) / totalWeight * 100).toFixed(1)}%`);
+    console.log(`[${requestId}] 加权轮询选择: ${selectedBackend}, 权重: ${selectedWeightInfo?.weight || 1}/${totalWeight}, 响应时间: ${selectedWeightInfo?.responseTime || 0}ms`);
     
     // 调试信息
     if (getConfig(env, 'DEBUG_MODE', false)) {

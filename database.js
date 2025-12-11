@@ -33,7 +33,7 @@ export class SafeD1Database {
         .prepare(`
           SELECT * FROM backend_status 
           WHERE healthy = 1 
-          ORDER BY weight DESC, avg_response_time ASC
+          ORDER BY weight DESC, response_time ASC
           LIMIT 1
         `)
         .all();
@@ -254,7 +254,7 @@ export class SafeD1Database {
           backendUrl
         ).run();
         
-        console.log(`[${requestId}] 更新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 权重: ${newWeight}, 成功率: ${(successRate * 100).toFixed(1)}%, 平均响应时间: ${Math.round(avgResponseTime)}ms, 更新时间: ${beijingTime}`);
+        console.log(`[${requestId}] 更新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 权重: ${newWeight}, 成功率: ${(successRate * 100).toFixed(1)}%, 平均响应时间: ${Math.round(avgResponseTime)}ms, 当前响应时间: ${safeHealthResult.responseTime || 0}ms, 更新时间: ${beijingTime}`);
         
       } else {
         // 插入新记录
@@ -286,7 +286,7 @@ export class SafeD1Database {
           beijingTime                       // updated_at_beijing (北京时间)
         ).run();
         
-        console.log(`[${requestId}] 插入新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 初始权重: ${initialWeight}, 创建时间: ${beijingTime}`);
+        console.log(`[${requestId}] 插入新后端状态: ${backendUrl}, 健康: ${safeHealthResult.healthy}, 初始权重: ${initialWeight}, 当前响应时间: ${safeHealthResult.responseTime || 0}ms, 创建时间: ${beijingTime}`);
       }
       
       return true;
@@ -645,7 +645,7 @@ export class SafeD1Database {
       // 获取所有后端状态（从 backend_status 表）
       const backendStatus = await this.getAllBackendStatus();
       
-      // 【新增】获取最高权重的可用后端
+      // 【新增】获取最高权重的可用后端（权重相同按响应时间排序）
       const highestWeightBackend = await this.getHighestWeightAvailableBackend();
       const currentAvailableBackend = highestWeightBackend ? highestWeightBackend.backend_url : null;
       
@@ -730,11 +730,12 @@ export class SafeD1Database {
         concurrentStats: concurrentStats,
         // 【修改】使用最高权重的健康后端作为可用后端
         availableBackend: currentAvailableBackend,
-        // 【新增】返回最高权重后端信息用于显示
+        // 【新增】返回最高权重后端信息用于显示，包括当前响应时间
         highestWeightBackendInfo: highestWeightBackend ? {
           backend_url: highestWeightBackend.backend_url,
           weight: highestWeightBackend.weight,
           avg_response_time: highestWeightBackend.avg_response_time,
+          current_response_time: highestWeightBackend.response_time, // 当前响应时间
           last_checked_beijing: highestWeightBackend.last_checked_beijing
         } : null,
         backendUrls: backendUrls,

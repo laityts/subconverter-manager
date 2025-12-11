@@ -41,7 +41,19 @@ export async function createEnhancedStatusPage(requestId, env, db) {
     const totalBackends = statusData.backendUrls?.length || 0;
     const healthyBackends = statusData.healthStats?.healthyBackends || 0;
     const availableBackend = statusData.availableBackend;
-    const fastestResponseTime = statusData.fastestResponseTime || 0;
+    const currentBackendResponseTime = statusData.highestWeightBackendInfo?.current_response_time || 
+                                       statusData.backendStatus.find(b => b.backend_url === availableBackend)?.response_time || 
+                                       statusData.fastestResponseTime || 0;
+
+    // 【新增】获取当前使用后端的平均响应时间
+    let currentBackendAvgResponseTime = 0;
+    if (availableBackend && backendStatus.length > 0) {
+      const currentBackend = backendStatus.find(b => b.backend_url === availableBackend);
+      if (currentBackend) {
+        currentBackendAvgResponseTime = currentBackend.avg_response_time || 0;
+      }
+    }
+
     const avgBackendWeight = statusData.healthStats?.avgWeight || 0;
     const avgRequestWeight = statusData.requestStats?.avgBackendWeight || 0;
     
@@ -427,25 +439,59 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             white-space: nowrap;
         }
         
-        /* 通知消息内容 */
+        /* 通知消息内容 - 修改为完整显示，带展开收起功能 */
+        .notification-message-container {
+            position: relative;
+            margin-bottom: 12px;
+        }
+        
         .notification-message {
             font-size: 13px;
             line-height: 1.5;
             color: #495057;
-            margin-bottom: 12px;
             word-break: break-word;
-            max-height: 60px;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            max-height: 120px;
             overflow: hidden;
-            text-overflow: ellipsis;
-            display: -webkit-box;
-            -webkit-line-clamp: 3;
-            -webkit-box-orient: vertical;
+            transition: max-height 0.3s ease;
+            position: relative;
         }
         
         .notification-message.expanded {
             max-height: none;
-            -webkit-line-clamp: unset;
             overflow: visible;
+        }
+        
+        .notification-message.fade-out::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 30px;
+            background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0.9));
+            pointer-events: none;
+        }
+        
+        .notification-expand-btn {
+            margin-top: 8px;
+            padding: 4px 10px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #6c757d;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+        
+        .notification-expand-btn:hover {
+            background: #e9ecef;
+            color: #495057;
         }
         
         /* 通知详情 */
@@ -477,27 +523,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-        }
-        
-        /* 展开/收起按钮 */
-        .notification-expand-btn {
-            margin-top: 10px;
-            padding: 4px 10px;
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #6c757d;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            transition: all 0.2s ease;
-        }
-        
-        .notification-expand-btn:hover {
-            background: #e9ecef;
-            color: #495057;
         }
         
         /* 空状态 */
@@ -654,7 +679,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
         .backend-stats-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 8px;
+            gap: 6px;
             margin-bottom: 12px;
         }
 
@@ -667,14 +692,14 @@ export async function createEnhancedStatusPage(requestId, env, db) {
 
         .stat-label {
             display: block;
-            font-size: 11px;
+            font-size: 10px;
             color: #6c757d;
             margin-bottom: 2px;
         }
 
         .stat-value {
             display: block;
-            font-size: 14px;
+            font-size: 12px;
             font-weight: 700;
             color: #2c3e50;
         }
@@ -1109,7 +1134,8 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             }
             
             .backend-stats-grid {
-                grid-template-columns: repeat(4, 1fr);
+                grid-template-columns: repeat(2, 1fr);
+                gap: 6px;
             }
             
             .stat-item {
@@ -1173,8 +1199,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             
             .notification-message {
                 font-size: 12px;
-                max-height: 48px;
-                -webkit-line-clamp: 2;
             }
             
             .notification-details {
@@ -1307,7 +1331,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             }
             
             .d1-stat-card:nth-child(3) {
-                background: linear-gradient(135deg, #3182ce 0%, #00b5d8 100%);
+                background: linear-gradient(135deg, #3182ce 0%, #00f2fe 100%);
             }
             
             .d1-stat-card:nth-child(4) {
@@ -1464,11 +1488,12 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             <h3>当前使用后端</h3>
             <div class="backend-url">${availableBackend}</div>
             <div class="backend-meta">
-                <span class="meta-item">最快响应: ${fastestResponseTime > 0 ? fastestResponseTime + 'ms' : '未知'}</span>
-                <span class="meta-item">最后更新: ${lastUpdateTime}</span>
-                <span class="meta-item">负载均衡算法: ${lbAlgorithmName}</span>
-                <span class="meta-item">平均后端权重: ${Math.round(avgBackendWeight)}</span>
+                <span class="meta-item">当前响应: ${currentBackendResponseTime > 0 ? currentBackendResponseTime + 'ms' : '未知'}</span>
+                <span class="meta-item">平均响应: ${currentBackendAvgResponseTime > 0 ? Math.round(currentBackendAvgResponseTime) + 'ms' : '未知'}</span>
                 <span class="meta-item">平均请求权重: ${Math.round(avgRequestWeight)}</span>
+                <span class="meta-item">平均后端权重: ${Math.round(avgBackendWeight)}</span>
+                <span class="meta-item">负载均衡算法: ${lbAlgorithmName}</span>
+                <span class="meta-item">最后更新: ${lastUpdateTime}</span>
             </div>
         </div>
         ` : totalBackends > 0 ? `
@@ -1482,19 +1507,19 @@ export async function createEnhancedStatusPage(requestId, env, db) {
             <div style="color: #383d41;">尚未配置后端服务器</div>
         </div>
         `}
-        
+                
         <div class="request-stats">
             <h3>📊 请求统计</h3>
             <div class="backend-meta">
                 <span class="meta-item">今日请求: ${todayRequestCount}</span>
+                <span class="meta-item">总请求: ${totalRequests}</span>
                 <span class="meta-item">今日成功: ${todaySuccessfulRequests}</span>
                 <span class="meta-item">今日成功率: ${todayRequestCount > 0 ? Math.round(todaySuccessfulRequests / todayRequestCount * 100) : 0}%</span>
                 <span class="meta-item">今日平均响应: ${displayAvgResponseTime}ms</span>
-                <span class="meta-item">总请求: ${totalRequests}</span>
                 <span class="meta-item">历史平均响应: ${avgResponseTime}ms</span>
             </div>
         </div>
-        
+                
         <div class="lb-info">
             <h3>🚦 负载均衡配置</h3>
             <div class="backend-meta">
@@ -1519,8 +1544,10 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                   const weight = backend.weight || baseWeight;
                   const failureCount = backend.failure_count || 0;
                   const requestCount = backend.request_count || 0;
+                  const successCount = backend.success_count || 0;
                   const successRate = (backend.success_rate || 0) * 100;
                   const avgResponseTime = backend.avg_response_time || 0;
+                  const currentResponseTime = backend.response_time || 0;
                   const lastSuccessBeijing = backend.last_success_beijing || '从未';
                   const lastCheckedBeijing = backend.last_checked_beijing || '未知';
                   const updatedAtBeijing = backend.updated_at_beijing || '未知';
@@ -1529,6 +1556,10 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                   const statusClass = healthy ? 'health-up' : 'health-down';
                   const statusText = healthy ? '正常' : '异常';
                   const weightPercentage = Math.round((weight / maxWeight) * 100);
+                  
+                  // 计算成功和失败次数
+                  const successTimes = successCount || 0;
+                  const failedTimes = Math.max(0, (requestCount || 0) - successTimes);
                   
                   return `
                   <div class="backend-card ${healthy ? 'backend-healthy' : 'backend-unhealthy'}">
@@ -1551,30 +1582,46 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                           </div>
                           <span class="backend-version">${version}</span>
                       </div>
-                      
+                                            
                       <div class="backend-stats-grid">
+                          <!-- 1. 成功次数 -->
+                          <div class="stat-item">
+                              <span class="stat-label">成功次数</span>
+                              <span class="stat-value stat-good">${successTimes}</span>
+                          </div>
+                          <!-- 2. 成功率 -->
                           <div class="stat-item">
                               <span class="stat-label">成功率</span>
                               <span class="stat-value ${successRate >= 90 ? 'stat-good' : successRate >= 70 ? 'stat-warning' : 'stat-bad'}">
                                   ${successRate.toFixed(1)}%
                               </span>
                           </div>
+                          <!-- 3. 当前响应 -->
+                          <div class="stat-item">
+                              <span class="stat-label">当前响应</span>
+                              <span class="stat-value ${currentResponseTime < 300 ? 'stat-good' : currentResponseTime < 800 ? 'stat-warning' : 'stat-bad'}">
+                                  ${currentResponseTime ? Math.round(currentResponseTime) + 'ms' : '未知'}
+                              </span>
+                          </div>
+                          <!-- 4. 平均响应 -->
                           <div class="stat-item">
                               <span class="stat-label">平均响应</span>
                               <span class="stat-value ${avgResponseTime < 300 ? 'stat-good' : avgResponseTime < 800 ? 'stat-warning' : 'stat-bad'}">
                                   ${avgResponseTime ? Math.round(avgResponseTime) + 'ms' : '未知'}
                               </span>
                           </div>
+                          <!-- 5. 请求数 -->
                           <div class="stat-item">
                               <span class="stat-label">请求数</span>
                               <span class="stat-value">${requestCount}</span>
                           </div>
+                          <!-- 6. 失败次数 -->
                           <div class="stat-item">
-                              <span class="stat-label">失败数</span>
-                              <span class="stat-value">${failureCount}</span>
+                              <span class="stat-label">失败次数</span>
+                              <span class="stat-value ${failedTimes > 0 ? 'stat-bad' : 'stat-good'}">${failedTimes}</span>
                           </div>
                       </div>
-                      
+                                            
                       <div class="backend-meta-details">
                           <div class="meta-detail">
                               <span class="meta-label">最后成功:</span>
@@ -1779,8 +1826,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                     
                     const message = notification.message || '无消息内容';
                     const escapedMessage = escapeHtmlSimple(message);
-                    const shortMessage = message.length > 80 ? message.substring(0, 80) + '...' : message;
-                    const escapedShortMessage = escapeHtmlSimple(shortMessage);
                     
                     const requestId = notification.request_id || '';
                     const clientIp = notification.client_ip || '';
@@ -1799,8 +1844,14 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                         <span class="notification-time" title="${fullTime}">${shortTime}</span>
                     </div>
                     
-                    <div class="notification-message" id="message-${notificationId}" data-full="${escapedMessage}">
-                        ${escapedShortMessage}
+                    <div class="notification-message-container">
+                        <div class="notification-message" id="message-${notificationId}">
+                            ${escapedMessage}
+                        </div>
+                        <button class="notification-expand-btn" data-id="${notificationId}">
+                            <span class="expand-icon">📖</span>
+                            <span class="expand-text">展开详情</span>
+                        </button>
                     </div>
                     
                     <div class="notification-details">
@@ -1828,12 +1879,6 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                             <span class="text">${statusCode}</span>
                         </div>` : ''}
                     </div>
-                    
-                    ${message.length > 80 ? `
-                    <button class="notification-expand-btn" data-id="${notificationId}" onclick="toggleNotificationMessage('${notificationId}')">
-                        <span class="expand-icon">📖</span>
-                        <span class="expand-text">展开详情</span>
-                    </button>` : ''}
                 </div>`;
                 }).join('')}
             </div>
@@ -1981,35 +2026,26 @@ export async function createEnhancedStatusPage(requestId, env, db) {
         function toggleNotificationMessage(id) {
             const messageElement = document.getElementById('message-' + id);
             const button = document.querySelector('[data-id="' + id + '"]');
+            const expandText = button?.querySelector('.expand-text');
+            const expandIcon = button?.querySelector('.expand-icon');
             
             if (!messageElement || !button) return;
             
             const isExpanded = messageElement.classList.contains('expanded');
-            const encodedFullMessage = messageElement.getAttribute('data-full');
-            const fullMessage = decodeHtmlSimple(encodedFullMessage);
             
             if (isExpanded) {
                 // 收起
-                const shortMessage = fullMessage.length > 80 ? 
-                    fullMessage.substring(0, 80) + '...' : 
-                    fullMessage;
-                messageElement.textContent = shortMessage;
                 messageElement.classList.remove('expanded');
+                messageElement.classList.add('fade-out');
                 
-                const expandText = button.querySelector('.expand-text');
                 if (expandText) expandText.textContent = '展开详情';
-                
-                const expandIcon = button.querySelector('.expand-icon');
                 if (expandIcon) expandIcon.textContent = '📖';
             } else {
                 // 展开
-                messageElement.textContent = fullMessage;
                 messageElement.classList.add('expanded');
+                messageElement.classList.remove('fade-out');
                 
-                const expandText = button.querySelector('.expand-text');
                 if (expandText) expandText.textContent = '收起详情';
-                
-                const expandIcon = button.querySelector('.expand-icon');
                 if (expandIcon) expandIcon.textContent = '📘';
             }
         }
@@ -2123,6 +2159,13 @@ export async function createEnhancedStatusPage(requestId, env, db) {
                         toggleNotificationMessage(id);
                     }
                 });
+            });
+            
+            // 自动为长消息添加淡出效果
+            document.querySelectorAll('.notification-message').forEach(messageElement => {
+                if (messageElement.scrollHeight > 120) {
+                    messageElement.classList.add('fade-out');
+                }
             });
         });
         
@@ -2376,16 +2419,7 @@ export async function createEnhancedStatusPage(requestId, env, db) {
         }
         
         const style = document.createElement('style');
-        style.textContent = \`
-            @keyframes fadeIn {
-                from { opacity: 0; transform: translateX(-50%) translateY(20px); }
-                to { opacity: 1; transform: translateX(-50%) translateY(0); }
-            }
-            @keyframes fadeOut {
-                from { opacity: 1; transform: translateX(-50%) translateY(0); }
-                to { opacity: 0; transform: translateX(-50%) translateY(20px); }
-            }
-        \`;
+        style.textContent = '\\n            @keyframes fadeIn {\\n                from { opacity: 0; transform: translateX(-50%) translateY(20px); }\\n                to { opacity: 1; transform: translateX(-50%) translateY(0); }\\n            }\\n            @keyframes fadeOut {\\n                from { opacity: 1; transform: translateX(-50%) translateY(0); }\\n                to { opacity: 0; transform: translateX(-50%) translateY(20px); }\\n            }\\n        ';
         document.head.appendChild(style);
         
         let lastActivity = Date.now();

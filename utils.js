@@ -340,6 +340,10 @@ export function formatTelegramMessage(notificationData) {
         message += `<b>🏆 最高权重后端</b>\n`;
         message += `<b>后端地址:</b> <code>${notificationData.current_backend}</code>\n`;
         message += `<b>权重:</b> ${notificationData.highest_weight_info.weight}\n`;
+        // 【新增】在平均响应时间上方添加当前响应时间
+        if (notificationData.highest_weight_info.current_response_time) {
+          message += `<b>当前响应时间:</b> ${notificationData.highest_weight_info.current_response_time}ms\n`;
+        }
         message += `<b>平均响应时间:</b> ${notificationData.highest_weight_info.avg_response_time}ms\n\n`;
       }
       
